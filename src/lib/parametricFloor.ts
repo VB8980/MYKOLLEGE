@@ -26,12 +26,19 @@ export interface ParametricBuildingInput {
   floors: SemanticRoom[][];
   /** форматирование номера аудитории: (level, idx1based) => string */
   formatNumber: (level: number, roomIndex: number) => string;
+  /**
+   * Якорь для passage-ребра (мост между зданиями): id коридорного узла этого
+   * этажа (например 'si.dk.f1.c0'). Если не задан — ничего не добавляется.
+   */
+  passageAnchor?: { level: number };
 }
 
 export interface ParametricBuildingResult {
   nodes: NavNode[];
   edges: NavEdge[];
   rooms: Room[];
+  /** Якорь passage-ребра (если запрошен): id коридорного узла + world Y этажа. */
+  passageAnchor?: { nodeId: string; y: number };
 }
 
 const FLOOR_H = 3.2, YOFF = 0.2;
@@ -146,5 +153,13 @@ export function buildParametricBuilding(inp: ParametricBuildingInput): Parametri
     if (useElevator) edges.push(edge(`${tag(lvl)}.el`, `${tag(lvl + 1)}.el`, 'vertical'));
   }
 
-  return { nodes, edges, rooms };
+  // --- якорь passage-ребра (мост): первый коридорный узел заданного этажа ---
+  let passageAnchor: ParametricBuildingResult['passageAnchor'];
+  if (inp.passageAnchor && corridorPts.length) {
+    const lvl = inp.passageAnchor.level;
+    const nodeId = `${tag(lvl)}.c0`;
+    if (nodes.some((n) => n.id === nodeId)) passageAnchor = { nodeId, y: fy(lvl) };
+  }
+
+  return { nodes, edges, rooms, ...(passageAnchor ? { passageAnchor } : {}) };
 }

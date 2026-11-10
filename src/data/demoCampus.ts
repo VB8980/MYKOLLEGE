@@ -144,11 +144,13 @@ interface ParamCfg {
   /** дверь с улицы (layout-позиция из DOORS) и сторона фасада */
   doorNode: string; side: EntranceDoor['side']; doorLabel: string;
   levels: number[]; floors: SemanticRoom[][];
+  /** якорь passage-ребра (мост) — этаж коридорного узла, если задан */
+  passageLevel?: number;
 }
 
 const PARAM_CFG: ParamCfg[] = [
   { id: 'dk', name: 'Дом культуры МИЭТ (2)', short: 'Корпус 2 · ДК', kind: 'other', color: '#fbbf24',
-    doorNode: 'do.dk', side: 'south', doorLabel: 'Вход ДК', levels: [0, 1],
+    doorNode: 'do.dk', side: 'south', doorLabel: 'Вход ДК', levels: [0, 1], passageLevel: 1,
     floors: [
       [{ name: 'Актовый зал ДК', kind: 'assembly-hall' }, { name: 'Фойе', kind: 'lobby' }, { name: 'Костюмерная', kind: 'other' }],
       [{ name: 'Столовая', kind: 'cafeteria-seating' }, { name: 'Приёмная комиссия', kind: 'office' }, { name: 'Кружковая', kind: 'other' }],
@@ -212,6 +214,7 @@ function buildParametric(cfg: ParamCfg) {
   const gen = buildParametricBuilding({
     buildingId: cfg.id, rect, corridorPts: corPts, hall, floors: cfg.floors,
     formatNumber: (lvl, idx) => rc(cfg.id, lvl, idx),
+    ...(cfg.passageLevel !== undefined ? { passageAnchor: { level: cfg.passageLevel } } : {}),
   });
   const doors: EntranceDoor[] = [{
     id: `door.${cfg.id}`, buildingId: cfg.id, position: { x: lx(doorPt), z: ly(doorPt) },
@@ -230,7 +233,7 @@ function buildParametric(cfg: ParamCfg) {
     roomIds: gen.rooms.filter((r) => r.floor === lvl).map((r) => r.id),
   }));
   const building: Building = { id: cfg.id, name: cfg.name, shortName: cfg.short, kind: cfg.kind, footprint: rect, levels: cfg.levels, floors: floorsOut, color: cfg.color };
-  return { building, nodes: gen.nodes, edges: [...gen.edges, ...doorEdges], rooms: gen.rooms, verticals, doors };
+  return { building, nodes: gen.nodes, edges: [...gen.edges, ...doorEdges], rooms: gen.rooms, verticals, doors, passageAnchor: gen.passageAnchor };
 }
 
 const paramBuilt = PARAM_CFG.map(buildParametric);
@@ -241,8 +244,16 @@ export const DEMO_ROOMS:Room[]=built.flatMap(b=>b.rooms);
 export const DEMO_DOORS:EntranceDoor[]=built.flatMap(b=>b.doors);
 export const DEMO_VERTICALS:VerticalConnection[]=built.flatMap(b=>b.verticals);
 export const DEMO_INDOOR_NODES:NavNode[]=built.flatMap(b=>b.nodes);
-/** Мост 1<->ДК (стеклянный, уровень 2 этажа): passage edge, Y ровный. */
-const PASSAGE:NavEdge[]=[ie('si.b1.f1.c6','si.dk.f1.c0')];
+/** Мост 1<->ДК (стеклянный, уровень 2 этажа): passage edge между якорями кольцевого коридора b1 и hall-этажа ДК. */
+const PASSAGE:NavEdge[]=(()=>{
+  const dkAnchor = paramBuilt.find((p)=>p.passageAnchor)?.passageAnchor;
+  if(!dkAnchor) return [];
+  // Северная грань кольца 2 этажа b1 — узел c6 (СВ); Y обеих точек одинаков (fy(1)).
+  const b1n = 'si.b1.f1.c6';
+  const hasB1 = DEMO_INDOOR_NODES.some((n)=>n.id===b1n);
+  if(!hasB1) return [];
+  return [{ from: b1n, to: dkAnchor.nodeId, kind: 'passage', bidirectional: true } as NavEdge];
+})();
 export const DEMO_INDOOR_EDGES:NavEdge[]=[...built.flatMap(b=>b.edges),...PASSAGE];
 
 export const DEMO_CAMPUS:CampusData={
