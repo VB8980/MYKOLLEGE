@@ -1,74 +1,78 @@
 // ============================================================
-// Глобальное состояние приложения (Zustand)
+// Глобальное состояние (Zustand) — Модель А + активное здание для indoor
 // ============================================================
 import { create } from 'zustand';
-import type { PlaceRef, Route } from '../data/types';
-import { demoCampus } from '../data/demoCampus';
-import { buildRoute, type RouteResult } from '../lib/router';
-import { prepareRouteForDisplay } from '../lib/routeTransform';
+import type { Place, Route } from '../data/types';
+import { DEMO_CAMPUS } from '../data/demoCampus';
+import { buildGraph, type Graph } from '../lib/graph';
+import { findPath } from '../lib/astar';
+import { transformRoute } from '../lib/routeTransform';
+import { buildSearchIndex, createSearcher, searchLocations } from '../lib/search';
 
 export type ViewMode = 'campus' | 'indoor';
 export type CameraMode = 'overview' | 'fly' | 'fpv';
 export type AnimState = 'idle' | 'playing' | 'paused' | 'done';
 
-interface AppState {
-  // Данные
-  campus: typeof demoCampus;
-  buildingId: string;
-  floorId: string;
+const campus = DEMO_CAMPUS;
+const graph: Graph = buildGraph(campus);
+const searchIndex = buildSearchIndex(campus);
+export const searcher = createSearcher(searchIndex);
 
-  // Режим отображения
+interface AppState {
+  campus: typeof DEMO_CAMPUS;
+  graph: Graph;
+  searchIndex: Place[];
+
   viewMode: ViewMode;
   darkTheme: boolean;
   showAllFloors: boolean;
   isolateFloor: boolean;
   showGraph: boolean;
   avoidStairs: boolean;
+  activeFloor: number | null;
+  activeBuilding: string | null;
 
-  // Маршрут
-  from: PlaceRef | null;
-  to: PlaceRef | null;
+  from: Place | null;
+  to: Place | null;
   route: Route | null;
   routeError: string | null;
-  activeStep: number;          // активный шаг анимации
-  animProgress: number;        // 0..1 прогресс вдоль маршрута
 
-  // Камера/анимация
   cameraMode: CameraMode;
   animState: AnimState;
-  animSpeed: number;           // множитель скорости
-  cameraResetTick: number;     // счётчик для команды "сбросить камеру"
-  arrived: boolean;            // показывать "Вы прибыли"
+  animSpeed: number;
+  animTime: number;
+  activeStep: number;
+  arrived: boolean;
+  cameraResetTick: number;
 
-  // Действия
-  setBuilding: (id: string) => void;
-  setFloor: (id: string) => void;
-  setViewMode: (m: ViewMode) => void;
-  setFrom: (p: PlaceRef | null) => void;
-  setTo: (p: PlaceRef | null) => void;
+  // Сигнатуры методов (только типы, без реализаций)
+  setFrom: (p: Place | null) => void;
+  setTo: (p: Place | null) => void;
   swapPoints: () => void;
   clearRoute: () => void;
   computeRoute: () => void;
+  setViewMode: (m: ViewMode) => void;
+  setActiveFloor: (f: number | null) => void;
+  setActiveBuilding: (id: string | null) => void;
   setCameraMode: (m: CameraMode) => void;
   play: () => void;
   pause: () => void;
   resume: () => void;
   resetAnim: () => void;
   setAnimSpeed: (s: number) => void;
-  setAnimProgress: (t: number, distance: number) => void;
+  tickAnim: (dt: number) => void;
   toggleDark: () => void;
   setShowAllFloors: (v: boolean) => void;
   setIsolateFloor: (v: boolean) => void;
   setShowGraph: (v: boolean) => void;
   setAvoidStairs: (v: boolean) => void;
   resetCamera: () => void;
+  search: (q: string) => Place[];
   demoRun: () => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
-  campus: demoCampus,
-  buildingId: demoCampus.buildings[0].id,
-  floorId: demoCampus.buildings[0].floors[0].id,
+  campus, graph, searchIndex,
 
   viewMode: 'campus',
   darkTheme: true,
@@ -76,115 +80,90 @@ export const useAppStore = create<AppState>((set, get) => ({
   isolateFloor: true,
   showGraph: false,
   avoidStairs: false,
+  activeFloor: 0,
+  activeBuilding: null,
 
-  from: null,
-  to: null,
-  route: null,
-  routeError: null,
-  activeStep: -1,
-  animProgress: 0,
+  from: null, to: null, route: null, routeError: null,
 
   cameraMode: 'overview',
   animState: 'idle',
   animSpeed: 1,
-  cameraResetTick: 0,
+  animTime: 0,
+  activeStep: -1,
   arrived: false,
+  cameraResetTick: 0,
 
-  setBuilding: (id) => {
-    const b = get().campus.buildings.find((x) => x.id === id);
-    set({ buildingId: id, floorId: b?.floors[0]?.id ?? get().floorId });
-  },
-  setFloor: (id) => set({ floorId: id }),
-  setViewMode: (m) => set({ viewMode: m }),
-  setFrom: (p) => set({ from: p }),
-  setTo: (p) => set({ to: p }),
-  swapPoints: () => {
-    const { from, to } = get();
-    set({ from: to, to: from });
-    get().computeRoute();
-  },
-  clearRoute: () => set({ route: null, routeError: null, animState: 'idle', animProgress: 0, activeStep: -1, arrived: false, cameraMode: 'overview' }),
+  // Реализации методов
+  setFrom: (p) => set({ from: p, route: null, routeError: null }),
+  setTo: (p) => set({ to: p, route: null, routeError: null }),
+  swapPoints: () => { const { from, to } = get(); set({ from: to, to: from, route: null }); get().computeRoute(); },
+  clearRoute: () => set({ route: null, routeError: null, animState: 'idle', animTime: 0, activeStep: -1, arrived: false, cameraMode: 'overview', activeBuilding: null }),
+
   computeRoute: () => {
-    const { from, to, avoidStairs } = get();
-    if (!from || !to) {
-      set({ routeError: 'Выберите начальную и конечную точку.' });
-      return;
-    }
-    const res: RouteResult = buildRoute(from, to, avoidStairs);
-    if ('error' in res) {
-      set({ route: null, routeError: res.error, animState: 'idle', arrived: false });
-      return;
-    }
-    const r = res.route;
-    // автовыбор этажа: первый внутренний этаж маршрута
-    const firstFloor = r.floorsInvolved[0];
+    const { from, to } = get();
+    if (!from || !to) { set({ routeError: 'Выберите начальную и конечную точку.' }); return; }
+    if (from.id === to.id) { set({ routeError: 'Начало и конец совпадают.' }); return; }
+    const found = findPath(get().graph, from.id, to.id);
+    if (!found) { set({ route: null, routeError: 'Маршрут между точками не найден.' }); return; }
+    const route = transformRoute(found.path, found.edges, from, to);
+    const firstFloor = route.floorsVisited[0] ?? null;
+    const ab = to.category === 'room' ? to.buildingId ?? null : from.category === 'room' ? from.buildingId ?? null : null;
     set({
-      route: r,
-      routeError: null,
-      animProgress: 0,
-      activeStep: -1,
-      arrived: false,
-      animState: 'idle',
-      ...(firstFloor ? { floorId: firstFloor, viewMode: 'indoor' } : {}),
+      route, routeError: null, animTime: 0, activeStep: -1, arrived: false, animState: 'idle',
+      activeBuilding: ab,
+      ...(firstFloor != null ? { activeFloor: firstFloor, viewMode: 'indoor' as ViewMode } : {}),
     });
   },
-  setCameraMode: (m) => set({ cameraMode: m, ...(m === 'fly' || m === 'fpv' ? { animState: get().route ? 'playing' : 'idle' } : {}) }),
+
+  setViewMode: (m) => set({ viewMode: m }),
+  setActiveFloor: (f) => set({ activeFloor: f }),
+  setActiveBuilding: (id) => set({ activeBuilding: id, viewMode: id ? 'indoor' : 'campus' }),
+  setCameraMode: (m) => set({ cameraMode: m }),
   play: () => {
     if (!get().route) { get().computeRoute(); if (!get().route) return; }
-    if (get().animState === 'done') set({ animProgress: 0, arrived: false, activeStep: -1 });
+    if (get().animState === 'done') set({ animTime: 0, arrived: false, activeStep: -1 });
     set({ animState: 'playing', cameraMode: get().cameraMode === 'overview' ? 'fly' : get().cameraMode });
   },
   pause: () => set({ animState: 'paused' }),
   resume: () => set({ animState: 'playing' }),
-  resetAnim: () => set({ animProgress: 0, activeStep: -1, arrived: false, animState: 'idle', cameraMode: 'overview', cameraResetTick: get().cameraResetTick + 1 }),
+  resetAnim: () => set({ animTime: 0, activeStep: -1, arrived: false, animState: 'idle', cameraMode: 'overview', cameraResetTick: get().cameraResetTick + 1 }),
   setAnimSpeed: (s) => set({ animSpeed: s }),
-  setAnimProgress: (t, distance) => {
-    const st = get();
-    const r = st.route;
-    if (!r) return;
+
+  tickAnim: (dt) => {
+    const st = get(); const r = st.route;
+    if (!r || st.animState !== 'playing') return;
+    const t = st.animTime + dt;
+    const end = r.durationSec;
     let step = -1;
-    for (let i = 0; i < r.steps.length; i++) if (distance >= r.steps[i].atDistance) step = i;
-    const arrived = t >= 0.995;
-    // автопереключение этажа по активной точке маршрута
-    let newFloor = st.floorId;
-    let newView = st.viewMode;
-    const idx = Math.min(r.points.length - 1, Math.round(t * (r.points.length - 1)));
-    const activePt = r.points[idx];
-    if (activePt) {
-      if (activePt.floorId === null) newView = 'campus';
-      else { newFloor = activePt.floorId; newView = 'indoor'; }
-    }
+    for (let i = 0; i < r.steps.length; i++) if (t >= r.steps[i].tStart) step = i;
+    const cur = r.steps[step];
+    const newFloor = cur?.floor ?? st.activeFloor;
+    const newView: ViewMode = cur?.buildingId ? 'indoor' : 'campus';
+    const arrived = t >= end;
     set({
-      animProgress: t,
-      activeStep: step,
-      arrived: arrived || st.arrived,
-      floorId: newFloor,
-      viewMode: newView,
+      animTime: Math.min(t, end), activeStep: step, arrived: arrived || st.arrived,
+      activeFloor: newFloor, viewMode: newView,
+      ...(cur?.buildingId ? { activeBuilding: cur.buildingId } : {}),
       ...(arrived ? { animState: 'done' as AnimState } : {}),
     });
   },
+
   toggleDark: () => set({ darkTheme: !get().darkTheme }),
   setShowAllFloors: (v) => set({ showAllFloors: v, ...(v ? { isolateFloor: false } : {}) }),
   setIsolateFloor: (v) => set({ isolateFloor: v, ...(v ? { showAllFloors: false } : {}) }),
   setShowGraph: (v) => set({ showGraph: v }),
   setAvoidStairs: (v) => { set({ avoidStairs: v }); if (get().route) get().computeRoute(); },
   resetCamera: () => set({ cameraResetTick: get().cameraResetTick + 1, animState: 'idle', cameraMode: 'overview' }),
+  search: (q) => searchLocations(searcher, q),
 
-  // Демонстрационный режим: сам строит и проигрывает маршрут от входа колледжа до лаборатории 204
+  // Сквозное демо по РЕАЛЬНОМУ плану корпуса 1
   demoRun: () => {
     set({
-      from: { kind: 'outdoor', id: 'n_bus_stop', name: 'Остановка «МИЭТ»' },
-      to: { kind: 'room', id: 'lab_204', buildingId: 'college', name: 'Лаборатория 204' },
+      from: { id: 'sun4', name: 'Остановка «Главный вход»', category: 'outdoor' },
+      to: { id: 'si.b1.room.rectorate', name: 'Ректорат (ауд. 1222)', category: 'room', buildingId: 'b1', floor: 1 },
       viewMode: 'campus',
     });
     get().computeRoute();
-    set({ animProgress: 0, arrived: false, activeStep: -1, cameraMode: 'fly', animState: 'playing' });
+    set({ animTime: 0, arrived: false, activeStep: -1, cameraMode: 'fly', animState: 'playing' });
   },
 }));
-
-/** Точки маршрута в мировых координатах для текущей камеры/линии */
-export function displayedRoutePoints(): ReturnType<typeof prepareRouteForDisplay> {
-  const { route, viewMode } = useAppStore.getState();
-  if (!route) return [];
-  return prepareRouteForDisplay(route, viewMode);
-}

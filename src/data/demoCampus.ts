@@ -1,737 +1,197 @@
 /**
- * Демонстрационный кампус колледжа: 7 зданий с внутренними этажами,
- * входные двери, лестницы/лифты и единый навигационный граф.
- *
- * Конвенции:
- *  - Y пола: этаж 1 = 0, каждый следующий +4 м (цоколь -1 = -4 м).
- *  - Коридоры идут вдоль Z («вдоль корпуса»), входы комнат — с западной стороны.
- *  - id узлов: c.<bld>.<floor>.<n> (коридор), r.<roomId> (комната),
- *    st/el.<bld>.<n>.<floor> (вертикальные), i.d.<key> (внутренняя точка двери).
- *  - Наружные точки дверей d.<key> и street-подходы объявлены в campusOutdoor.ts.
+ * Кампус МИЭТ: layout по квадрантам Яндекс-карты (зазоры >=10 м, наездов нет).
+ * Корпус 1 — реальный план из JSON (affine-маппинг). Протон(6) — учебные аудитории.
+ * Колледж(8) — демо-интерьер (данных нет, честно). Лабораторный(7) — ориентир без
+ * интерьеров. Стадион — поле (render в Scene), не коробка. Удалены: 5-коробка,
+ * автохоз, энерго, пожарная, Saffron, технодеревни, ИЦНТ, ГНЦ-коробка.
+ * Мост 1<->ДК = passage edge на уровне 2 этажа. Модель А: FLOOR_H=3.2.
  */
-
 import type {
-  Building,
-  CampusData,
-  EntranceDoor,
-  Floor,
-  NavEdge,
-  NavNode,
-  Rect,
-  Room,
-  VerticalConnection,
+  Building, CampusData, EntranceDoor, Floor, NavEdge, NavNode, Rect, Room, VerticalConnection,
 } from './types';
-import {
-  DOOR_ANCHORS,
-  DOOR_OUTDOOR_POS,
-  LANDMARKS,
-  OUTDOOR_EDGES,
-  OUTDOOR_NODES,
-  OUTDOOR_PATHS,
-} from './campusOutdoor';
+import { OUTDOOR_EDGES, OUTDOOR_LANDMARKS, OUTDOOR_NODES, OUTDOOR_PATHS } from './campusOutdoor';
+import { BUILDING_NUMBER, formatRoomCode } from '../lib/roomCode';
 
-/* ============================= геометрия зданий ============================= */
+const FLOOR_H = 3.2, CEIL = 3.0, YOFF = 0.2;
+const fy = (lvl: number): number => lvl * FLOOR_H + YOFF;
+const rc = (b: string, lvl: number, idx: number, suf?: string): string =>
+  formatRoomCode({ building: BUILDING_NUMBER[b] ?? 0, floor: lvl + 1, room: idx, suffix: suf });
 
-export const BUILDINGS: Building[] = [
-  {
-    id: 'b1',
-    name: 'Учебный корпус №1',
-    shortName: 'Корпус 1',
-    kind: 'academic',
-    footprint: rect(100, -30, 180, 30),
-    levels: [1, 2, 3],
-    floors: [],
-    color: '#1e2a3d',
-  },
-  {
-    id: 'b2',
-    name: 'Библиотека',
-    shortName: 'Библиотека',
-    kind: 'library',
-    footprint: rect(-135, -120, -65, -70),
-    levels: [1, 2],
-    floors: [],
-    color: '#20304a',
-  },
-  {
-    id: 'b3',
-    name: 'Учебный корпус №2',
-    shortName: 'Корпус 2',
-    kind: 'academic',
-    footprint: rect(-135, -50, -65, 5),
-    levels: [-1, 1, 2],
-    floors: [],
-    color: '#1c2739',
-  },
-  {
-    id: 'b4',
-    name: 'Общежитие №3',
-    shortName: 'Общага №3',
-    kind: 'dormitory',
-    footprint: rect(-135, 60, -65, 110),
-    levels: [1, 2, 3],
-    floors: [],
-    color: '#232c40',
-  },
-  {
-    id: 'b5',
-    name: 'Столовая «Академия»',
-    shortName: 'Столовая',
-    kind: 'canteen',
-    footprint: rect(30, 30, 70, 60),
-    levels: [1],
-    floors: [],
-    color: '#2a2740',
-  },
-  {
-    id: 'b6',
-    name: 'Спортивный комплекс',
-    shortName: 'Спорткомплекс',
-    kind: 'sports',
-    footprint: rect(70, 60, 130, 110),
-    levels: [1],
-    floors: [],
-    color: '#1f3347',
-  },
-  {
-    id: 'b7',
-    name: 'Медицинский центр',
-    shortName: 'Медпункт',
-    kind: 'medical',
-    footprint: rect(130, -70, 180, -30),
-    levels: [1],
-    floors: [],
-    color: '#274050',
-  },
+/* affine JSON(0,0)=ЮЗ, X=восток 0..108, Y=север 0..98 -> world b1 X[-25,65] Z[-130,-40] */
+const mx = (jx: number): number => -25 + jx * (90 / 108);
+const mz = (jy: number): number => -40 - jy * (90 / 98);
+type Conv = 'wh' | 'xy';
+function pr(poly: number[], conv: Conv): Rect {
+  if (conv === 'wh') return { minX: mx(poly[0]), maxX: mx(poly[0]+poly[2]), minZ: mz(poly[1]+poly[3]), maxZ: mz(poly[1]) };
+  return { minX: mx(poly[0]), maxX: mx(poly[2]), minZ: mz(poly[3]), maxZ: mz(poly[1]) };
+}
+const pr4 = (poly: number[], conv: Conv): [number,number,number,number] => { const r=pr(poly,conv); return [r.minX,r.minZ,r.maxX,r.maxZ]; };
+const pc = (poly: number[], conv: Conv): [number,number] => { const r=pr(poly,conv); return [(r.minX+r.maxX)/2,(r.minZ+r.maxZ)/2]; };
+function ringPts(o: Rect): [number,number][] {
+  const {minX:a,maxX:b,minZ:c,maxZ:d}=o, hx=(a+b)/2, hz=(c+d)/2;
+  return [[b,c],[hx,c],[a,c],[a,hz],[a,d],[hx,d],[b,d],[b,hz]];
+}
+const R1 = pr([29,17,79,67],'xy');
+
+const inNode=(id:string,type:NavNode['type'],x:number,y:number,z:number,b:string,f:number,label?:string,roomId?:string):NavNode=>
+  ({id,type,position:{x,y,z},buildingId:b,floor:f,...(label?{label}:{}),...(roomId?{roomId}:{})});
+const ie=(a:string,b:string):NavEdge=>({from:a,to:b,kind:'indoor',bidirectional:true});
+const re_=(a:string,b:string):NavEdge=>({from:a,to:b,kind:'enter-room',bidirectional:true});
+const de=(a:string,b:string):NavEdge=>({from:a,to:b,kind:'through-door',bidirectional:true});
+const ve=(a:string,b:string):NavEdge=>({from:a,to:b,kind:'vertical',bidirectional:true});
+const iChain=(ids:string[]):NavEdge[]=>{const o:NavEdge[]=[];for(let i=0;i<ids.length-1;i++)o.push(ie(ids[i],ids[i+1]));return o;};
+
+interface RoomCfg{id:string;num:string;name:string;kind:Room['kind'];rect:[number,number,number,number];}
+interface VertCfg{kind:'stairs'|'elevator';x:number;z:number;from:number;to:number;label:string;}
+interface FloorCfg{lvl:number;name:string;cor:[number,number][];rooms:RoomCfg[];verticals:VertCfg[];hall?:[number,number];}
+interface BldCfg{id:string;name:string;short:string;kind:Building['kind'];color:string;
+  foot:[number,number,number,number];levels:number[];floors:FloorCfg[];
+  door?:{outdoorNode:string;pos:[number,number];side:EntranceDoor['side'];label:string};}
+
+function nearCor(ids:string[],pos:Map<string,[number,number]>,x:number,z:number):string{
+  let best=ids[0],bd=Infinity; for(const c of ids){const[cx,cz]=pos.get(c)!;const d=Math.hypot(cx-x,cz-z);if(d<bd){bd=d;best=c;}} return best;
+}
+function build(cfg:BldCfg){
+  const nodes:NavNode[]=[],edges:NavEdge[]=[],rooms:Room[]=[],verticals:VerticalConnection[]=[],doors:EntranceDoor[]=[],floors:Floor[]=[];
+  const foot:Rect={minX:cfg.foot[0],minZ:cfg.foot[1],maxX:cfg.foot[2],maxZ:cfg.foot[3]};
+  const pos=new Map<string,[number,number]>(); const byLvl=new Map<number,string[]>();
+  for(const f of cfg.floors){ const ids:string[]=[];
+    f.cor.forEach(([x,z],k)=>{const cid=`si.${cfg.id}.f${f.lvl}.c${k}`;ids.push(cid);pos.set(cid,[x,z]);nodes.push(inNode(cid,'corridor',x,fy(f.lvl),z,cfg.id,f.lvl));});
+    byLvl.set(f.lvl,ids); edges.push(...iChain(ids)); if(ids.length>2)edges.push(ie(ids[ids.length-1],ids[0]));
+  }
+  for(const f of cfg.floors){ const ids=byLvl.get(f.lvl)!; const rids:string[]=[];
+    if(f.hall){const hid=`si.${cfg.id}.f${f.lvl}.hall`;nodes.push(inNode(hid,'door-indoor',f.hall[0],fy(f.lvl),f.hall[1],cfg.id,f.lvl,'Холл'));edges.push(ie(nearCor(ids,pos,f.hall[0],f.hall[1]),hid));}
+    for(const r of f.rooms){const aid=`si.${cfg.id}.room.${r.id}`;const cx=(r.rect[0]+r.rect[2])/2,cz=(r.rect[1]+r.rect[3])/2;
+      nodes.push(inNode(aid,'room',cx,fy(f.lvl),cz,cfg.id,f.lvl,r.name,r.id));edges.push(re_(nearCor(ids,pos,cx,cz),aid));
+      rooms.push({id:r.id,number:r.num,name:r.name,kind:r.kind,buildingId:cfg.id,floor:f.lvl,rect:{minX:r.rect[0],minZ:r.rect[1],maxX:r.rect[2],maxZ:r.rect[3]},doorNodes:[aid]});rids.push(r.id);}
+    for(const vv of f.verticals){const s=vv.kind==='elevator'?'el':'st';const a=`si.${cfg.id}.f${vv.from}.${s}`,b=`si.${cfg.id}.f${vv.to}.${s}`;
+      if(!nodes.some(n=>n.id===a))nodes.push(inNode(a,vv.kind,vv.x,fy(vv.from),vv.z,cfg.id,vv.from,vv.label));
+      if(!nodes.some(n=>n.id===b))nodes.push(inNode(b,vv.kind,vv.x,fy(vv.to),vv.z,cfg.id,vv.to,vv.label));
+      edges.push(ve(a,b));edges.push(ie(nearCor(byLvl.get(vv.from)!,pos,vv.x,vv.z),a));edges.push(ie(nearCor(byLvl.get(vv.to)!,pos,vv.x,vv.z),b));
+      verticals.push({id:`v.${cfg.id}.${s}.${vv.from}-${vv.to}`,buildingId:cfg.id,kind:vv.kind,position:{x:vv.x,z:vv.z},fromFloor:vv.from,toFloor:vv.to,fromNode:a,toNode:b,label:vv.label});}
+    floors.push({level:f.lvl,name:f.name,height:f.lvl*FLOOR_H,ceiling:CEIL,shape:[foot],roomIds:rids});
+  }
+  if(cfg.door){const hid=`si.${cfg.id}.f0.hall`;doors.push({id:`door.${cfg.id}`,buildingId:cfg.id,position:{x:cfg.door.pos[0],z:cfg.door.pos[1]},outdoorNode:cfg.door.outdoorNode,indoorNode:hid,side:cfg.door.side,label:cfg.door.label});edges.push(de(cfg.door.outdoorNode,hid));}
+  const building:Building={id:cfg.id,name:cfg.name,shortName:cfg.short,kind:cfg.kind,footprint:foot,levels:cfg.levels,floors,color:cfg.color};
+  return{building,nodes,edges,rooms,verticals,doors};
+}
+
+const B1:BldCfg={id:'b1',name:'Административный корпус (1)',short:'Корпус 1',kind:'admin',color:'#f59e0b',
+  foot:[-25,-130,65,-40],levels:[0,1],
+  door:{outdoorNode:'do.b1',pos:[73,-85],side:'east',label:'Главный вход (портал)'},
+  floors:[
+    {lvl:0,name:'1 этаж',hall:pc([80,40,27.5,21],'wh'),cor:ringPts(R1),
+      rooms:[
+        {id:'lib_f1',num:'Библ.',name:'Библиотека: читальный зал, абонемент (барельеф Э. Неизвестного)',kind:'reading-room',rect:pr4([39,27,30,30],'wh')},
+        {id:'vestibule_e',num:'Вест.',name:'Вестибюль (восточный неф)',kind:'lobby',rect:pr4([80,40,27.5,21],'wh')},
+        {id:'wardrobe',num:'Гард.',name:'Гардероб; магазин канцелярии',kind:'other',rect:pr4([80,19,27.5,20],'wh')},
+        {id:'bakery',num:'Буфет',name:'Пекарня / буфет',kind:'cafeteria-seating',rect:pr4([80,62,27.5,21],'wh')},
+        {id:'k1107',num:'1107',name:'Канцелярия (ауд. 1107)',kind:'office',rect:pr4([80,0.5,27.5,17.5],'wh')},
+        {id:'miet_tv',num:'ТВ',name:'Студия и съёмочный павильон МИЭТ-ТВ',kind:'other',rect:pr4([71,0.5,36.5,16],'wh')},
+        {id:'kadr',num:'КАДР',name:'Отдел кадров',kind:'office',rect:pr4([0.5,43.5,27,22],'wh')},
+        {id:'aud01',num:rc('b1',0,1),name:'Поточная №1 (200–250 мест)',kind:'lecture-hall',rect:pr4([3,0.5,33,16],'wh')},
+        {id:'aud02',num:rc('b1',0,2),name:'Поточная №2 (200–250 мест)',kind:'lecture-hall',rect:pr4([37,0.5,33,16],'wh')},
+        {id:'aud03',num:rc('b1',0,3),name:'Поточная №3 (200–250 мест)',kind:'lecture-hall',rect:pr4([3,67.5,33,16],'wh')},
+        {id:'aud04',num:rc('b1',0,4),name:'Поточная №4 (200–250 мест)',kind:'lecture-hall',rect:pr4([37,67.5,33,16],'wh')},
+        {id:'aud05',num:rc('b1',0,5),name:'Поточная №5 (200–250 мест)',kind:'lecture-hall',rect:pr4([0.5,20,27,22],'wh')},
+      ],
+      verticals:[
+        {kind:'stairs',x:pc([88,33.5,12,25],'wh')[0],z:pc([88,33.5,12,25],'wh')[1],from:0,to:1,label:'Парадная лестница'},
+        {kind:'stairs',x:pc([31,19.5,46,5.5],'wh')[0],z:pc([31,19.5,46,5.5],'wh')[1],from:0,to:1,label:'Пандус — подъём без ступеней'},
+        {kind:'stairs',x:pc([31.5,33.5,12,22],'wh')[0],z:pc([31.5,33.5,12,22],'wh')[1],from:0,to:1,label:'Лестница в обход куба'},
+      ]},
+    {lvl:1,name:'2 этаж',cor:ringPts(R1),
+      rooms:[
+        {id:'lib_f2',num:'Библ.2',name:'Библиотека: 2-й ярус, портретная галерея',kind:'reading-room',rect:pr4([39,27,30,30],'wh')},
+        {id:'rectorate',num:'1222',name:'Ректорат (галерея), ауд. 1222 — ректор',kind:'office',rect:pr4([0.5,20,27,46.5],'wh')},
+        {id:'k1206',num:'1206',name:'Профком (ауд. 1206)',kind:'office',rect:pr4([0.5,43.5,27,12.5],'wh')},
+        {id:'balcony',num:'Балк.',name:'Балкон вестибюля над восточным нефом',kind:'other',rect:pr4([80,40,27.5,21],'wh')},
+        {id:'aud01_u',num:rc('b1',1,1),name:'Поточная №1–2 (верхний ярус)',kind:'lecture-hall',rect:pr4([3,0.5,33,16],'wh')},
+        {id:'aud03_u',num:rc('b1',1,3),name:'Поточная №3 (верхний ярус)',kind:'lecture-hall',rect:pr4([3,67.5,33,16],'wh')},
+        {id:'aud04_u',num:rc('b1',1,4),name:'Поточная №4 (верхний ярус)',kind:'lecture-hall',rect:pr4([37,67.5,33,16],'wh')},
+        {id:'aud05_u',num:rc('b1',1,5),name:'Поточная №5 (верхний ярус)',kind:'lecture-hall',rect:pr4([0.5,67.5,27,16],'wh')},
+      ],
+      verticals:[
+        {kind:'stairs',x:pc([88,33.5,12,25],'wh')[0],z:pc([88,33.5,12,25],'wh')[1],from:1,to:0,label:'Парадная лестница'},
+        {kind:'stairs',x:pc([31,19.5,46,5.5],'wh')[0],z:pc([31,19.5,46,5.5],'wh')[1],from:1,to:0,label:'Пандус — верхняя площадка'},
+      ]},
+  ]};
+
+const CONFIGS:BldCfg[]=[
+  B1,
+  {id:'dk',name:'Дом культуры МИЭТ (2)',short:'Корпус 2 · ДК',kind:'other',color:'#fbbf24',
+    foot:[85,-130,165,-45],levels:[0,1],
+    door:{outdoorNode:'do.dk',pos:[77,-85],side:'west',label:'Вход ДК'},
+    floors:[
+      {lvl:0,name:'1 этаж',hall:[95,-85],cor:[[110,-85],[140,-85]],
+        rooms:[{id:'dk_hall',num:rc('dk',0,1),name:'ДК МИЭТ (актовый зал)',kind:'assembly-hall',rect:[100,-125,160,-50]}],
+        verticals:[{kind:'stairs',x:140,z:-70,from:0,to:1,label:'Лестница ДК'}]},
+      {lvl:1,name:'2 этаж',cor:[[110,-85],[140,-85]],
+        rooms:[{id:'dk_canteen',num:rc('dk',1,1),name:'Столовая',kind:'cafeteria-seating',rect:[100,-125,130,-50]},
+               {id:'dk_adm',num:rc('dk',1,2),name:'Приёмная комиссия',kind:'office',rect:[135,-125,160,-50]}],verticals:[]},
+    ]},
+  {id:'uk3',name:'Учебный корпус 3',short:'Корпус 3',kind:'academic',color:'#f59e0b',
+    foot:[-120,-30,-25,55],levels:[0,1,2],
+    door:{outdoorNode:'do.uk3',pos:[-128,12],side:'west',label:'Вход 3 корпуса'},
+    floors:[
+      {lvl:0,name:'1 этаж',hall:[-110,12],cor:[[-95,12],[-65,12],[-35,12]],
+        rooms:[{id:'uk3_canteen',num:rc('uk3',0,1),name:'Столовая',kind:'cafeteria-seating',rect:[-115,-25,-70,0]},
+               {id:'uk3_med',num:rc('uk3',0,2),name:'Здравпункт',kind:'ward',rect:[-65,-25,-30,0]}],
+        verticals:[{kind:'stairs',x:-65,z:35,from:0,to:1,label:'Лестница 3 корпуса'}]},
+      {lvl:1,name:'2 этаж',cor:[[-95,12],[-65,12],[-35,12]],
+        rooms:[{id:'uk3_econ',num:rc('uk3',1,1),name:'Центр экономики учебного процесса',kind:'office',rect:[-115,-25,-70,0]},
+               {id:'uk3_mil',num:rc('uk3',1,2),name:'Военно-учётный стол',kind:'office',rect:[-65,-25,-30,0]}],
+        verticals:[{kind:'stairs',x:-65,z:35,from:1,to:2,label:'Лестница 3 корпуса'}]},
+      {lvl:2,name:'3 этаж',cor:[[-95,12],[-65,12],[-35,12]],
+        rooms:[{id:'uk3_ss',num:rc('uk3',2,1),name:'Студенческий совет',kind:'office',rect:[-115,-25,-70,0]},
+               {id:'uk3_youth',num:rc('uk3',2,2),name:'Молодёжный центр',kind:'other',rect:[-65,-25,-30,0]}],verticals:[]},
+    ]},
+  {id:'uk4',name:'Учебный корпус 4',short:'Корпус 4',kind:'academic',color:'#f59e0b',
+    foot:[-125,-130,-35,-45],levels:[0],
+    door:{outdoorNode:'do.uk4',pos:[-133,-80],side:'west',label:'Вход 4 корпуса'},
+    floors:[{lvl:0,name:'1 этаж',hall:[-115,-80],cor:[[-100,-80],[-70,-80],[-45,-80]],
+      rooms:[{id:'uk4_iac',num:rc('uk4',0,1),name:'Информационно-аналитический центр',kind:'office',rect:[-120,-125,-40,-50]}],verticals:[]}]},
+  {id:'proton',name:'Завод «Протон-МИЭТ» (6) + учебные аудитории',short:'Протон',kind:'other',color:'#a16207',
+    foot:[-245,-35,-130,55],levels:[0,1],
+    door:{outdoorNode:'do.proton',pos:[-122,10],side:'east',label:'Вход Протон (учебный)'},
+    floors:[
+      {lvl:0,name:'1 этаж (цех + ауд.)',hall:[-135,10],cor:[[-160,10],[-190,10],[-220,10]],
+        rooms:[{id:'pr_shop',num:'ЦЕХ',name:'Производственный цех',kind:'other',rect:[-240,-30,-145,0]},
+               {id:'pr_a1',num:rc('proton',0,1),name:'Учебная аудитория Протон',kind:'classroom',rect:[-140,-30,-135,0]}],
+        verticals:[{kind:'stairs',x:-190,z:30,from:0,to:1,label:'Лестница Протон'}]},
+      {lvl:1,name:'2 этаж (ауд. + ОК)',cor:[[-160,10],[-190,10],[-220,10]],
+        rooms:[{id:'pr_a2',num:rc('proton',1,1),name:'Учебная аудитория Протон',kind:'classroom',rect:[-240,-30,-190,0]},
+               {id:'pr_qc',num:rc('proton',1,2),name:'Отдел качества',kind:'office',rect:[-185,-30,-135,0]}],verticals:[]},
+    ]},
+  {id:'college',name:'Колледж электроники и информатики (8)',short:'Колледж',kind:'academic',color:'#fbbf24',
+    foot:[-210,62,-95,92],levels:[0,1],
+    door:{outdoorNode:'do.college',pos:[-150,108],side:'south',label:'Главный вход колледжа'},
+    floors:[
+      {lvl:0,name:'1 этаж',hall:[-150,85],cor:[[-190,85],[-150,85],[-110,85]],
+        rooms:[{id:'c101',num:rc('college',0,1),name:'Учебная аудитория (демо)',kind:'classroom',rect:[-205,65,-160,80]},
+               {id:'c102',num:rc('college',0,2),name:'Учебная аудитория (демо)',kind:'classroom',rect:[-140,65,-100,80]}],
+        verticals:[{kind:'stairs',x:-150,z:72,from:0,to:1,label:'Лестница колледжа'}]},
+      {lvl:1,name:'2 этаж',cor:[[-190,85],[-150,85],[-110,85]],
+        rooms:[{id:'c201',num:rc('college',1,1),name:'Компьютерный класс (демо)',kind:'lab',rect:[-205,65,-160,80]},
+               {id:'c202',num:rc('college',1,2),name:'Лаборатория сетей (демо)',kind:'lab',rect:[-140,65,-100,80]}],verticals:[]},
+    ]},
+  // лабораторный (7) — ориентир без интерьеров/целей
+  {id:'lab',name:'Лабораторный корпус (7, не для учёбы)',short:'Лабораторный',kind:'academic',color:'#d97706',foot:[-245,-130,-135,-45],levels:[0],floors:[]},
 ];
 
-/* ============================= комнаты ============================= */
+const built=CONFIGS.map(build);
+export const DEMO_BUILDINGS:Building[]=built.map(b=>b.building);
+export const DEMO_ROOMS:Room[]=built.flatMap(b=>b.rooms);
+export const DEMO_DOORS:EntranceDoor[]=built.flatMap(b=>b.doors);
+export const DEMO_VERTICALS:VerticalConnection[]=built.flatMap(b=>b.verticals);
+export const DEMO_INDOOR_NODES:NavNode[]=built.flatMap(b=>b.nodes);
+/** Мост 1<->ДК (стеклянный, уровень 2 этажа): passage edge, Y ровный. */
+const PASSAGE:NavEdge[]=[ie('si.b1.f1.c6','si.dk.f1.c0')];
+export const DEMO_INDOOR_EDGES:NavEdge[]=[...built.flatMap(b=>b.edges),...PASSAGE];
 
-/** Буферы графа: наполняются при определении комнат и сборке (объявлены до использования). */
-const navNodes: NavNode[] = [...OUTDOOR_NODES];
-const edges: NavEdge[] = [...OUTDOOR_EDGES];
-
-const ROOMS: Room[] = [];
-const FLOOR_BY_BUILDING: Record<string, Floor[]> = { b1: [], b2: [], b3: [], b4: [], b5: [], b6: [], b7: [] };
-
-/** Якорные точки комнат (nodeId) для связки corridor -> room. */
-const roomAnchors: Record<string, string[]> = {};
-
-function addRoom(
-  buildingId: string,
-  level: number,
-  opts: {
-    number: string;
-    name: string;
-    kind: Room['kind'];
-    rect: Rect;
-    /** координаты точек дверей на стене (обычно западная сторона коридора) */
-    doors: Array<{ x: number; z: number }>;
-  },
-): Room {
-  const id = `${buildingId}.${level}.${opts.number}`;
-  const floorY = floorYOf(level);
-  const doorNodes = opts.doors.map((d, i) => `rd.${id}.${i}`);
-  const room: Room = {
-    id,
-    number: opts.number,
-    name: opts.name,
-    kind: opts.kind,
-    buildingId,
-    floor: level,
-    rect: opts.rect,
-    doorNodes,
-  };
-  ROOMS.push(room);
-  // узел-представитель комнаты
-  navNodes.push({
-    id: `r.${id}`,
-    type: 'room',
-    position: mid3(opts.rect, floorY + 0.1),
-    buildingId,
-    floor: level,
-    roomId: id,
-    label: roomLabel(room),
-  });
-  // узлы дверей комнаты (стоят у стены, внутри комнаты)
-  doorNodes.forEach((nid, i) => {
-    const d = opts.doors[i];
-    navNodes.push({
-      id: nid,
-      type: 'corridor',
-      position: { x: d.x, y: floorY, z: d.z },
-      buildingId,
-      floor: level,
-      roomId: id,
-    });
-  });
-  roomAnchors[id] = doorNodes;
-  return room;
-}
-
-function roomLabel(r: Room): string {
-  return r.kind === 'classroom' || r.kind === 'lab' || r.kind === 'office'
-    ? `${r.name} (${r.number})`
-    : r.name;
-}
-
-/* ---------------- b1: учебный корпус №1 (3 этажа) ---------------- */
-
-for (const level of [1, 2, 3]) {
-  const fy = floorYOf(level);
-  const prefix = String(level);
-  addRoom('b1', level, {
-    number: `${prefix}01`,
-    name: 'Лекционный зал',
-    kind: 'lecture-hall',
-    rect: rect(134, -26, 176, -10),
-    doors: [{ x: 135.5, z: -18 }],
-  });
-  addRoom('b1', level, {
-    number: `${prefix}02`,
-    name: 'Кабинет истории',
-    kind: 'classroom',
-    rect: rect(134, -8, 154, 6),
-    doors: [{ x: 135.5, z: -1 }],
-  });
-  addRoom('b1', level, {
-    number: `${prefix}03`,
-    name: 'Кабинет физики',
-    kind: 'lab',
-    rect: rect(156, -8, 176, 6),
-    doors: [{ x: 157.5, z: -1 }],
-  });
-  addRoom('b1', level, {
-    number: `${prefix}04`,
-    name: 'Кабинет математики',
-    kind: 'classroom',
-    rect: rect(134, 8, 154, 22),
-    doors: [{ x: 135.5, z: 15 }],
-  });
-  addRoom('b1', level, {
-    number: `${prefix}05`,
-    name: 'Компьютерный класс',
-    kind: 'lab',
-    rect: rect(156, 8, 176, 22),
-    doors: [{ x: 157.5, z: 15 }],
-  });
-  // коридорные узлы b1 (западная стена комнат x=134 => коридор 122..132)
-  void fy;
-}
-
-/* ---------------- b2: библиотека (2 этажа) ---------------- */
-
-addRoom('b2', 1, {
-  number: 'Холл',
-  name: 'Холл библиотеки',
-  kind: 'lobby',
-  rect: rect(-120, -118, -80, -100),
-  doors: [{ x: -100, z: -117 }], // со стороны северной двери
-});
-addRoom('b2', 1, {
-  number: '1.1',
-  name: 'Зал выдачи',
-  kind: 'reading-room',
-  rect: rect(-120, -98, -80, -74),
-  doors: [{ x: -100, z: -96.5 }],
-});
-addRoom('b2', 2, {
-  number: '2.1',
-  name: 'Читальный зал',
-  kind: 'reading-room',
-  rect: rect(-130, -118, -70, -98),
-  doors: [{ x: -100, z: -96.5 }],
-});
-addRoom('b2', 2, {
-  number: '2.2',
-  name: 'Архив',
-  kind: 'storage',
-  rect: rect(-130, -96, -70, -74),
-  doors: [{ x: -100, z: -97.5 }],
-});
-
-/* ---------------- b3: учебный корпус №2 (цоколь + 2 этажа) ---------------- */
-
-addRoom('b3', -1, {
-  number: '-101',
-  name: 'Склад оборудования',
-  kind: 'storage',
-  rect: rect(-130, -46, -70, -28),
-  doors: [{ x: -100, z: -26.5 }],
-});
-addRoom('b3', -1, {
-  number: '-102',
-  name: 'Серверная',
-  kind: 'other',
-  rect: rect(-130, -26, -70, -6),
-  doors: [{ x: -100, z: -27.5 }],
-});
-addRoom('b3', 1, {
-  number: '101',
-  name: 'Кабинет химии',
-  kind: 'lab',
-  rect: rect(-130, -46, -70, -28),
-  doors: [{ x: -100, z: -26.5 }],
-});
-addRoom('b3', 1, {
-  number: '102',
-  name: 'Кабинет биологии',
-  kind: 'lab',
-  rect: rect(-130, -26, -70, -6),
-  doors: [{ x: -100, z: -27.5 }],
-});
-addRoom('b3', 2, {
-  number: '201',
-  name: 'Актовый зал',
-  kind: 'assembly-hall',
-  rect: rect(-130, -46, -70, -6),
-  doors: [{ x: -100, z: -26.5 }],
-});
-
-/* ---------------- b4: общежитие №3 (3 этажа) ---------------- */
-
-for (const level of [1, 2, 3]) {
-  const p = String(level);
-  addRoom('b4', level, {
-    number: `${p}0`,
-    name: 'Кофейня',
-    kind: 'cafeteria-seating',
-    rect: rect(-130, 64, -70, 76),
-    doors: [{ x: -100, z: 77.5 }],
-  });
-  addRoom('b4', level, {
-    number: `${p}1–${p}4`,
-    name: `Жилое крыло ${p}-го этажа`,
-    kind: 'other',
-    rect: rect(-130, 78, -70, 96),
-    doors: [{ x: -100, z: 89 }],
-  });
-  addRoom('b4', level, {
-    number: `${p}5`,
-    name: 'Санузел',
-    kind: 'restroom',
-    rect: rect(-130, 98, -70, 108),
-    doors: [{ x: -100, z: 96.5 }],
-  });
-}
-
-/* ---------------- b5: столовая ---------------- */
-
-addRoom('b5', 1, {
-  number: 'Зал',
-  name: 'Основной зал',
-  kind: 'cafeteria-seating',
-  rect: rect(32, 32, 68, 50),
-  doors: [{ x: 40, z: 61.5 }],
-});
-addRoom('b5', 1, {
-  number: 'Кухня',
-  name: 'Кухня',
-  kind: 'kitchen',
-  rect: rect(32, 52, 68, 58),
-  doors: [{ x: 40, z: 50.5 }],
-});
-
-/* ---------------- b6: спорткомплекс ---------------- */
-
-addRoom('b6', 1, {
-  number: 'З1',
-  name: 'Игровой зал',
-  kind: 'gym',
-  rect: rect(72, 62, 128, 92),
-  doors: [{ x: 100, z: 88.5 }],
-});
-addRoom('b6', 1, {
-  number: 'Б',
-  name: 'Бассейн',
-  kind: 'pool',
-  rect: rect(72, 94, 128, 108),
-  doors: [{ x: 100, z: 92.5 }],
-});
-
-/* ---------------- b7: медпункт ---------------- */
-
-addRoom('b7', 1, {
-  number: 'К1',
-  name: 'Кабинет врача',
-  kind: 'ward',
-  rect: rect(132, -68, 178, -52),
-  doors: [{ x: 126.5, z: -60 }],
-});
-addRoom('b7', 1, {
-  number: 'П',
-  name: 'Процедурная',
-  kind: 'ward',
-  rect: rect(132, -50, 178, -32),
-  doors: [{ x: 126.5, z: -41 }],
-});
-
-/* ============================= этажи ============================= */
-
-/** Формируем Floor для каждого здания из его прямоугольников-комнат. */
-function buildFloors(): void {
-  for (const b of BUILDINGS) {
-    const byLevel = new Map<number, Room[]>();
-    for (const r of ROOMS.filter((x) => x.buildingId === b.id)) {
-      const arr = byLevel.get(r.floor) ?? [];
-      arr.push(r);
-      byLevel.set(r.floor, arr);
-    }
-    for (const level of b.levels) {
-      const rooms = byLevel.get(level) ?? [];
-      const shape: Rect[] = rooms.map((r) => r.rect);
-      FLOOR_BY_BUILDING[b.id].push({
-        level,
-        name: levelName(level),
-        height: floorYOf(level),
-        ceiling: 3.4,
-        shape,
-        roomIds: rooms.map((r) => r.id),
-      });
-    }
-    b.floors = FLOOR_BY_BUILDING[b.id];
-  }
-}
-
-function levelName(level: number): string {
-  if (level < 0) return `Подземный уровень (${level})`;
-  if (level === 1) return '1 этаж';
-  return `${level} этаж`;
-}
-
-function floorYOf(level: number): number {
-  return (level - 1) * 4;
-}
-
-/* ============================= двери зданий ============================= */
-
-export const DOORS: EntranceDoor[] = [
-  door('b1', 'north', 'Главный вход корпуса 1'),
-  door('b1', 'east', 'Восточный вход корпуса 1'),
-  door('b1', 'south', 'Южный вход корпуса 1'),
-  door('b2', 'north', 'Главный вход библиотеки'),
-  door('b2', 'west', 'Западный вход библиотеки', true),
-  door('b3', 'north', 'Северный вход корпуса 2'),
-  door('b3', 'south', 'Южный вход корпуса 2'),
-  door('b4', 'west', 'Западный вход общежития'),
-  door('b4', 'south', 'Главный вход общежития'),
-  door('b5', 'east', 'Вход в столовую'),
-  door('b6', 'south', 'Вход в спорткомплекс'),
-  door('b7', 'west', 'Вход в медпункт'),
-];
-
-function door(buildingId: string, side: EntranceDoor['side'], label: string, locked = false): EntranceDoor {
-  const key = doorKey(buildingId, side);
-  const pos = DOOR_OUTDOOR_POS[key];
-  if (!pos) throw new Error(`Нет позиции двери ${key}`);
-  const indoor = indoorDoorPos(buildingId, side);
-  return {
-    id: key,
-    buildingId,
-    position: pos,
-    outdoorNode: `d.${key}`,
-    indoorNode: `i.d.${key}`,
-    side,
-    locked,
-    label,
-  };
-}
-
-function doorKey(buildingId: string, side: string): string {
-  // особые ключи совпадают с DOOR_OUTDOOR_POS
-  if (buildingId === 'b5') return 'b5-canteen';
-  if (buildingId === 'b7') return 'b7-medical';
-  return `${buildingId}-${side}`;
-}
-
-/** Внутренняя точка каждой двери (в холле за дверью, Y = 0 — все входы на 1 этаже). */
-function indoorDoorPos(buildingId: string, side: EntranceDoor['side']): { x: number; z: number } {
-  const table: Record<string, { x: number; z: number }> = {
-    'b1-north': { x: 150, z: -27 },
-    'b1-east': { x: 177, z: 5 },
-    'b1-south': { x: 125, z: 27 },
-    'b2-north': { x: -100, z: -116 },
-    'b2-west': { x: -117, z: -95 },
-    'b3-north': { x: -100, z: -47 },
-    'b3-south': { x: -100, z: 3 },
-    'b4-west': { x: -117, z: 85 },
-    'b4-south': { x: -100, z: 106 },
-    'b5-canteen': { x: 67, z: 45 },
-    'b6-south': { x: 100, z: 89 },
-    'b7-medical': { x: 133, z: -60 },
-  };
-  const key = doorKey(buildingId, side);
-  const p = table[key];
-  if (!p) throw new Error(`Нет внутренней точки двери ${key}`);
-  return p;
-}
-
-/* ============================= вертикальные переходы ============================= */
-
-const VERTICALS_BUF: VerticalConnection[] = [];
-export const VERTICALS: VerticalConnection[] = [
-  // b1: лестница А и лифт
-  v('b1', 'stairs', { x: 127, z: -22 }, 1, 2, 'Лестница А'),
-  v('b1', 'stairs', { x: 127, z: -22 }, 2, 3, 'Лестница А'),
-  v('b1', 'stairs', { x: 127, z: 18 }, 1, 2, 'Лестница Б'),
-  v('b1', 'stairs', { x: 127, z: 18 }, 2, 3, 'Лестница Б'),
-  v('b1', 'elevator', { x: 127, z: -2 }, 1, 2, 'Лифт'),
-  v('b1', 'elevator', { x: 127, z: -2 }, 2, 3, 'Лифт'),
-  // b2
-  v('b2', 'stairs', { x: -112, z: -99 }, 1, 2, 'Лестница'),
-  v('b2', 'elevator', { x: -88, z: -99 }, 1, 2, 'Лифт'),
-  // b3 (цоколь <-> 1 <-> 2)
-  v('b3', 'stairs', { x: -75, z: -26 }, -1, 1, 'Лестница у входа'),
-  v('b3', 'stairs', { x: -75, z: -26 }, 1, 2, 'Лестница у входа'),
-  // b4
-  v('b4', 'stairs', { x: -75, z: 96 }, 1, 2, 'Лестница'),
-  v('b4', 'stairs', { x: -75, z: 96 }, 2, 3, 'Лестница'),
-  v('b4', 'elevator', { x: -125, z: 96 }, 1, 2, 'Лифт'),
-  v('b4', 'elevator', { x: -125, z: 96 }, 2, 3, 'Лифт'),
-];
-
-function v(
-  buildingId: string,
-  kind: VerticalConnection['kind'],
-  position: { x: number; z: number },
-  fromFloor: number,
-  toFloor: number,
-  label: string,
-): VerticalConnection {
-  const idx = VERTICALS_BUF.length;
-  const conn: VerticalConnection = {
-    id: `${buildingId}.v${idx}`,
-    buildingId,
-    kind,
-    position,
-    fromFloor,
-    toFloor,
-    fromNode: vertNode(buildingId, kind, position, fromFloor),
-    toNode: vertNode(buildingId, kind, position, toFloor),
-    label,
-  };
-  VERTICALS_BUF.push(conn);
-  return conn;
-}
-
-function vertNode(
-  buildingId: string,
-  kind: VerticalConnection['kind'],
-  position: { x: number; z: number },
-  level: number,
-): string {
-  const pre = kind === 'elevator' ? 'el' : 'st';
-  return `${pre}.${buildingId}.${position.x}_${position.z}.${level}`;
-}
-
-/* ============================= коридоры (узлы графа) ============================= */
-
-interface CorridorDef {
-  buildingId: string;
-  level: number;
-  nodes: Array<{ x: number; z: number }>;
-}
-
-const CORRIDORS: CorridorDef[] = [
-  // b1 — один продольный коридор на каждом этаже (x=127)
-  ...[1, 2, 3].map<CorridorDef>((lvl) => ({
-    buildingId: 'b1',
-    level: lvl,
-    nodes: [
-      { x: 127, z: -27 }, // у северного вестибюля
-      { x: 127, z: -22 }, // лестница А
-      { x: 127, z: -18 }, // дверь 101
-      { x: 127, z: -2 }, // лифт / поворот к южным дверям
-      { x: 127, z: 15 }, // траверс к дверям 104/105
-      { x: 127, z: 18 }, // лестница Б
-      { x: 127, z: 27 }, // к южному тамбуру
-      { x: 125, z: 27 }, // южный тамбур (у вост. конца)
-      { x: 177, z: 5 }, // восточное крыло у двери b1-east
-      { x: 177, z: -2 },
-      { x: 150, z: -27 }, // северный тамбур
-    ],
-  })),
-  // b2 — этаж 1: холл + зал выдачи; этаж 2: читальный + архив
-  { buildingId: 'b2', level: 1, nodes: [{ x: -100, z: -116 }, { x: -100, z: -99 }, { x: -112, z: -99 }, { x: -88, z: -99 }, { x: -117, z: -95 }] },
-  { buildingId: 'b2', level: 2, nodes: [{ x: -112, z: -99 }, { x: -100, z: -99 }, { x: -88, z: -99 }] },
-  // b3 — цоколь / 1 / 2
-  { buildingId: 'b3', level: -1, nodes: [{ x: -100, z: -47 }, { x: -100, z: -26 }, { x: -75, z: -26 }] },
-  { buildingId: 'b3', level: 1, nodes: [{ x: -100, z: -47 }, { x: -100, z: -26 }, { x: -75, z: -26 }, { x: -100, z: -6 }, { x: -100, z: 3 }] },
-  { buildingId: 'b3', level: 2, nodes: [{ x: -75, z: -26 }, { x: -100, z: -26 }] },
-  // b4 — три одинаковых этажа
-  ...[1, 2, 3].map<CorridorDef>((lvl) => ({
-    buildingId: 'b4',
-    level: lvl,
-    nodes: [
-      { x: -100, z: 106 }, // южный тамбур
-      { x: -100, z: 96 }, // лестница/лифт зона
-      { x: -75, z: 96 },
-      { x: -125, z: 96 },
-      { x: -100, z: 89 },
-      { x: -100, z: 77 },
-      { x: -100, z: 66 }, // к западному тамбуру
-      { x: -117, z: 85 },
-    ],
-  })),
-  // b5, b6, b7 — без выделенных коридоров (тамбуры у дверей)
-];
-
-/** Добавляем коридорные узлы и рёбра; возвращаем map nodeId -> index в navNodes. */
-function buildCorridors(): void {
-  for (const c of CORRIDORS) {
-    const fy = floorYOf(c.level);
-    const ids: string[] = [];
-    c.nodes.forEach((p, i) => {
-      const id = `c.${c.buildingId}.${c.level}.${i}`;
-      ids.push(id);
-      navNodes.push({
-        id,
-        type: 'corridor',
-        position: { x: p.x, y: fy, z: p.z },
-        buildingId: c.buildingId,
-        floor: c.level,
-      });
-    });
-    for (let i = 0; i + 1 < ids.length; i++) {
-      edges.push({ from: ids[i], to: ids[i + 1], kind: 'indoor', bidirectional: true });
-    }
-  }
-}
-
-/* ============================= сборка графа ============================= */
-
-buildGraph();
-
-function buildGraph(): void {
-  // 1. коридоры
-  buildCorridors();
-
-  // 2. наружные узлы дверей (d.<key>) + связка с якорем улицы уже в OUTDOOR_EDGES
-  for (const dr of DOORS) {
-    const pos = DOOR_OUTDOOR_POS[dr.id];
-    navNodes.push({
-      id: dr.outdoorNode,
-      type: 'door-outdoor',
-      position: { x: pos.x, y: 0, z: pos.z },
-      buildingId: dr.buildingId,
-      label: dr.label,
-    });
-    const inner = indoorDoorPos(dr.buildingId, dr.side);
-    navNodes.push({
-      id: dr.indoorNode,
-      type: 'door-indoor',
-      position: { x: inner.x, y: 0, z: inner.z },
-      buildingId: dr.buildingId,
-      floor: 1,
-      label: dr.label,
-    });
-    edges.push({ from: dr.outdoorNode, to: dr.indoorNode, kind: 'through-door', bidirectional: true });
-    // соединяем внутреннюю точку двери с ближайшим коридорным узлом этого этажа
-    linkToNearestCorridor(dr.indoorNode, dr.buildingId, 1, inner);
-  }
-
-  // 3. вертикальные переходы: узлы + рёбра vertical + привязка к коридорам
-  for (const vt of VERTICALS) {
-    for (const [nodeId, level] of [
-      [vt.fromNode, vt.fromFloor],
-      [vt.toNode, vt.toFloor],
-    ] as const) {
-      if (navNodes.some((nd) => nd.id === nodeId)) continue; // уже создан парным ребром
-      navNodes.push({
-        id: nodeId,
-        type: vt.kind === 'elevator' ? 'elevator' : 'stairs',
-        position: { x: vt.position.x, y: floorYOf(level), z: vt.position.z },
-        buildingId: vt.buildingId,
-        floor: level,
-        label: vt.label,
-      });
-      linkToNearestCorridor(nodeId, vt.buildingId, level, vt.position);
-    }
-    edges.push({ from: vt.fromNode, to: vt.toNode, kind: 'vertical', bidirectional: true });
-  }
-
-  // 4. комнаты: enter-room от ближайшего коридорного узла к якорю комнаты
-  for (const r of ROOMS) {
-    const anchorId = `r.${r.id}`;
-    for (const dn of r.doorNodes) {
-      // узел двери комнаты ставим рядом с якорем — соединяем их
-      edges.push({ from: dn, to: anchorId, kind: 'enter-room', bidirectional: true });
-      linkToNearestCorridor(dn, r.buildingId, r.floor, nodeById(dn)!.position);
-    }
-  }
-}
-
-function nodeById(id: string): NavNode | undefined {
-  return navNodes.find((nd) => nd.id === id);
-}
-
-/** Соединяет узел с ближайшим коридорным узлом того же здания/этажа (если ещё не соединён). */
-function linkToNearestCorridor(
-  nodeId: string,
-  buildingId: string,
-  level: number,
-  pos: { x: number; y?: number; z: number },
-): void {
-  let best: { id: string; d: number } | null = null;
-  for (const nd of navNodes) {
-    if (nd.type !== 'corridor' || nd.buildingId !== buildingId || nd.floor !== level) continue;
-    const d = Math.hypot(nd.position.x - pos.x, nd.position.z - pos.z);
-    if (!best || d < best.d) best = { id: nd.id, d };
-  }
-  if (!best || best.d > 14) return;
-  const dup = edges.some(
-    (e) => (e.from === nodeId && e.to === best!.id) || (e.to === nodeId && e.from === best!.id),
-  );
-  if (!dup) edges.push({ from: nodeId, to: best.id, kind: 'indoor', bidirectional: true });
-}
-
-/* ============================= публичные данные ============================= */
-
-buildFloors();
-
-export const NAV_NODES: NavNode[] = dedupeNodes(navNodes);
-export const NAV_EDGES: NavEdge[] = dedupeEdges(edges);
-
-export const DEMO_CAMPUS: CampusData = {
-  name: 'Колледж «Политех»',
-  buildings: BUILDINGS,
-  rooms: ROOMS,
-  doors: DOORS,
-  verticals: VERTICALS,
-  nodes: NAV_NODES,
-  edges: NAV_EDGES,
-  paths: OUTDOOR_PATHS,
-  landmarks: LANDMARKS,
+export const DEMO_CAMPUS:CampusData={
+  name:'Кампус МИЭТ — пл. Шокина, 1 (layout по Яндекс-карте, корпус 1 по реальному плану)',
+  buildings:DEMO_BUILDINGS,rooms:DEMO_ROOMS,doors:DEMO_DOORS,verticals:DEMO_VERTICALS,
+  nodes:[...OUTDOOR_NODES,...DEMO_INDOOR_NODES],edges:[...OUTDOOR_EDGES,...DEMO_INDOOR_EDGES],
+  paths:OUTDOOR_PATHS,landmarks:OUTDOOR_LANDMARKS,
 };
-
-function dedupeNodes(list: NavNode[]): NavNode[] {
-  const map = new Map<string, NavNode>();
-  for (const nd of list) {
-    const ex = map.get(nd.id);
-    if (ex && !nd.label) continue;
-    map.set(nd.id, nd);
-  }
-  return [...map.values()];
-}
-
-function dedupeEdges(list: NavEdge[]): NavEdge[] {
-  const seen = new Set<string>();
-  const out: NavEdge[] = [];
-  for (const e of list) {
-    const key = e.from < e.to ? `${e.from}|${e.to}|${e.kind}` : `${e.to}|${e.from}|${e.kind}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(e);
-  }
-  return out;
-}
-
-/* ============================= helpers ============================= */
-
-function rect(minX: number, minZ: number, maxX: number, maxZ: number): Rect {
-  return { minX, minZ, maxX, maxZ };
-}
-
-function mid3(r: Rect, y: number): { x: number; y: number; z: number } {
-  return { x: (r.minX + r.maxX) / 2, y, z: (r.minZ + r.maxZ) / 2 };
-}

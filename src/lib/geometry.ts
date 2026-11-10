@@ -1,52 +1,68 @@
-// Геометрические утилиты: полигоны, расстояния, центры
-import type { Polygon2D } from '../data/types';
+/**
+ * geometry.ts — мелкие геометрические утилиты для навигации.
+ *
+ * Всё работает в плоскости XZ (план кампуса); Y — только высота этажа.
+ * Внешних зависимостей нет: чистая математика.
+ */
 
-export function dist2(a: [number, number], b: [number, number]): number {
-  return Math.hypot(a[0] - b[0], a[1] - b[1]);
+import type { NavNode } from '../data/types';
+
+/** Скорость пешехода, м/с (используется для оценки времени пути). */
+const WALK_SPEED_MPS = 1.3;
+
+/** Длина одного сегмента между двумя позициями узлов (3D-евклидова). */
+export function segmentDistance(p1: NavNode, p2: NavNode): number {
+  const dx = p1.position.x - p2.position.x;
+  const dy = p1.position.y - p2.position.y;
+  const dz = p1.position.z - p2.position.z;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-/** Центр полигона (среднее вершин — достаточно для прямоугольных демо-полигонов) */
-export function polygonCentroid(poly: Polygon2D): [number, number] {
-  let sx = 0, sz = 0;
-  for (const p of poly) { sx += p[0]; sz += p[1]; }
-  return [sx / poly.length, sz / poly.length];
-}
-
-/** Ориентированная площадь полигона (знак — направление обхода) */
-export function polygonArea(poly: Polygon2D): number {
-  let s = 0;
-  for (let i = 0; i < poly.length; i++) {
-    const [x1, z1] = poly[i];
-    const [x2, z2] = poly[(i + 1) % poly.length];
-    s += x1 * z2 - x2 * z1;
+/** Суммарная длина пути по последовательности узлов (сумма всех сегментов). */
+export function totalPathLength(nodes: NavNode[]): number {
+  let sum = 0;
+  for (let i = 1; i < nodes.length; i++) {
+    sum += segmentDistance(nodes[i - 1], nodes[i]);
   }
-  return s / 2;
+  return sum;
 }
 
-/** Привести полигон к нужной ориентации (для ShapeGeometry в R3F нужен CCW сверху) */
-export function ensureOrientation(poly: Polygon2D, ccw: boolean): Polygon2D {
-  const area = polygonArea(poly);
-  const isCCW = area > 0; // при XZ->XY отображении знак может инвертироваться, вызывающий нормализует
-  return isCCW === ccw ? poly : [...poly].reverse();
+/** Позиции узлов как массив [x, y, z] — для отрисовки линии маршрута в Three.js. */
+export function pathToPoints3D(nodes: NavNode[]): [number, number, number][] {
+  return nodes.map((n) => [n.position.x, n.position.y, n.position.z]);
 }
 
-/** Угол между двумя векторами на плоскости, градусы [-180..180]. Положительный — поворот направо (по часовой в XZ с Z вниз) */
-export function signedAngleDeg(ax: number, az: number, bx: number, bz: number): number {
-  const cross = ax * bz - az * bx;
-  const dot = ax * bx + az * bz;
-  return (Math.atan2(cross, dot) * 180) / Math.PI;
+/** Оценка времени пешком, сек (скорость 1.3 м/с). */
+export function estimateWalkTime(meters: number): number {
+  return meters / WALK_SPEED_MPS;
 }
 
-/** Формат расстояния "12 м" / "0.5 км" */
-export function formatDistance(m: number): string {
-  if (m >= 1000) return `${(m / 1000).toFixed(2)} км`;
-  return `${Math.round(m)} м`;
-}
+/**
+ * Определяет поворот в точке b относительно направления a -> b -> c.
+ * Возвращает 'straight' | 'left' | 'right'.
+ *
+ * Работаем в плане XZ. Угол считаем через векторное произведение:
+ * знак Z-компоненты (dx1*dz2 - dz1*dx2) говорит о стороне поворота,
+ * а косинус угла между векторами — насколько сильный поворот.
+ * Малые углы и вырожденные (нулевые) векторы считаются 'straight'.
+ */
+export function angleBetween(a: NavNode, b: NavNode, c: NavNode): 'straight' | 'left' | 'right' {
+  const dx1 = b.position.x - a.position.x;
+  const dz1 = b.position.z - a.position.z;
+  const dx2 = c.position.x - b.position.x;
+  const dz2 = c.position.z - b.position.z;
 
-/** Время пешком при 1.3 м/с -> "3 мин" */
-export const WALK_SPEED = 1.3;
-export function formatDuration(sec: number): string {
-  const min = Math.max(1, Math.round(sec / 60));
-  if (min < 60) return `~${min} мин`;
-  return `~${Math.floor(min / 60)} ч ${min % 60} мин`;
+  const len1 = Math.hypot(dx1, dz1);
+  const len2 = Math.hypot(dx2, dz2);
+  if (len1 === 0 || len2 === 0) return 'straight'; // нет направления — поворот неопределён
+
+  const cos = (dx1 * dx2 + dz1 * dz2) / (len1 * len2);
+  // Порог ~25 градусов: всё, что отклоняется меньше, считаем движением прямо.
+  if (cos > Math.cos((25 * Math.PI) / 180)) return 'straight';
+
+  // Знак «псевдо-кросса»: > 0 — поворот налево, < 0 — направо (ось Y вверх).
+  const cross = dx1 * dz2 - dz1 * dx2;
+  if (cross > 0) return 'left';
+  if (cross < 0) return 'right';
+  return 'straight'; // разворот на 180° вдоль одной оси — формально без стороны
 }

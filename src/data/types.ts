@@ -312,3 +312,4 @@ export interface Place {
   buildingId?: string;
   description?: string;
 }
+

@@ -1,65 +1,129 @@
-// Универсальный A* по взвешенному графу
-import type { WeightedGraph } from './graph';
+/**
+ * astar.ts — поиск кратчайшего маршрута по графу кампуса (A*).
+ *
+ * Эвристика — евклидово расстояние между позициями узлов (Vec3).
+ * Вес ребра: edge.cost, если задан; иначе геометрическая длина ребра.
+ * Вертикальные переходы (лестницы/лифты) дополнительно «удорожаются»,
+ * чтобы маршрут учитывал неудобство подъёма.
+ *
+ * Учитываются все типы рёбер: indoor, through-door, vertical,
+ * enter-room, street (уличные), exit-building.
+ */
 
-export interface AStarResult {
-  path: string[];       // id узлов
-  cost: number;         // суммарная стоимость
-  found: boolean;
+import type { NavEdge, NavNode } from '../data/types';
+import type { Graph } from './graph';
+
+/** Результат поиска пути. */
+export interface PathResult {
+  path: NavNode[]; // узлы от start до finish включительно
+  edges: NavEdge[]; // рёбра между соседними узлами (length = path.length - 1)
+  length: number; // суммарная геометрическая длина, метры
+}
+
+// Штраф за вертикальный переход: лифт «дороже» лестницы по времени ожидания.
+const STAIRS_PENALTY = 5;
+const ELEVATOR_PENALTY = 8;
+
+/** Евклидово расстояние между позициями двух узлов. */
+function dist(a: NavNode, b: NavNode): number {
+  const dx = a.position.x - b.position.x;
+  const dy = a.position.y - b.position.y;
+  const dz = a.position.z - b.position.z;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/** Геометрическая длина ребра по позициям его концов. */
+function edgeLength(graph: Graph, edge: NavEdge): number {
+  const a = graph.nodeById.get(edge.from);
+  const b = graph.nodeById.get(edge.to);
+  if (!a || !b) return Infinity;
+  return dist(a, b);
+}
+
+/** Стоимость прохода ребра для A*: базовая длина + штраф за тип перехода. */
+function edgeCost(graph: Graph, edge: NavEdge): number {
+  const base = edge.cost ?? edgeLength(graph, edge);
+  if (edge.kind !== 'vertical') return base;
+  const node = graph.nodeById.get(edge.to);
+  return base + (node?.type === 'elevator' ? ELEVATOR_PENALTY : STAIRS_PENALTY);
+}
+
+/** Эвристика A*: прямое евклидово расстояние до цели (не переоценивает — допустима). */
+function heuristic(from: NavNode, goal: NavNode): number {
+  return dist(from, goal);
+}
+
+interface QueueItem {
+  id: string;
+  f: number; // g + h
 }
 
 /**
- * A*: эвристика — евклидово расстояние между узлами (координаты x/z или pos).
- * graph.getPos возвращает [x, z] для эвристики.
+ * Простейшая очередь с приоритетом: извлечение минимума за O(n) линейным
+ * сканом. Граф кампуса небольшой, этого достаточно (без внешних зависимостей).
  */
-export function astar(
-  graph: WeightedGraph<any>,
-  startId: string,
-  goalId: string,
-  getPos: (id: string) => [number, number] | null,
-): AStarResult {
-  if (!graph.nodes.has(startId) || !graph.nodes.has(goalId)) {
-    return { path: [], cost: Infinity, found: false };
+class PQueue {
+  private items: QueueItem[] = [];
+  get size(): number { return this.items.length; }
+  push(item: QueueItem): void { this.items.push(item); }
+  /** Извлекает элемент с минимальной f-оценкой. */
+  pop(): QueueItem | undefined {
+    let best = 0;
+    for (let i = 1; i < this.items.length; i++) {
+      if (this.items[i].f < this.items[best].f) best = i;
+    }
+    return this.items.length === 0 ? undefined : this.items.splice(best, 1)[0];
   }
-  if (startId === goalId) return { path: [startId], cost: 0, found: true };
+}
 
-  const goalPos = getPos(goalId);
-  const h = (id: string) => {
-    const p = getPos(id);
-    if (!p || !goalPos) return 0;
-    return Math.hypot(p[0] - goalPos[0], p[1] - goalPos[1]);
-  };
+/**
+ * Ищет путь от fromId до toId. Возвращает null, если узла нет в графе
+ * или маршрут между ними невозможен.
+ */
+export function findPath(graph: Graph, fromId: string, toId: string): PathResult | null {
+  const start = graph.nodeById.get(fromId);
+  const goal = graph.nodeById.get(toId);
+  if (!start || !goal) return null;
+  if (fromId === toId) return { path: [start], edges: [], length: 0 };
 
-  const gScore = new Map<string, number>();
-  const cameFrom = new Map<string, string>();
-  const open = new Set<string>([startId]);
-  const fScore = new Map<string, number>([[startId, h(startId)]]);
-  gScore.set(startId, 0);
+  const gScore = new Map<string, number>([[fromId, 0]]);
+  const cameFrom = new Map<string, { nodeId: string; edge: NavEdge }>();
+  const closed = new Set<string>();
+  const open = new PQueue();
+  open.push({ id: fromId, f: heuristic(start, goal) });
 
   while (open.size > 0) {
-    // выбор узла с минимальным f
-    let current = '';
-    let best = Infinity;
-    for (const id of open) {
-      const f = fScore.get(id) ?? Infinity;
-      if (f < best) { best = f; current = id; }
+    const current = open.pop()!;
+    if (current.id === toId) {
+      // Восстановление пути по цепочке предшественников.
+      const path: NavNode[] = [];
+      const edges: NavEdge[] = [];
+      let id = toId;
+      while (id !== fromId) {
+        const step = cameFrom.get(id)!;
+        path.unshift(graph.nodeById.get(id)!);
+        edges.unshift(step.edge);
+        id = step.nodeId;
+      }
+      path.unshift(start);
+      // Итоговая длина — честная геометрия без эвристических штрафов.
+      let length = 0;
+      for (const e of edges) length += edgeLength(graph, e);
+      return { path, edges, length };
     }
-    if (current === goalId) {
-      const path = [current];
-      let c = current;
-      while (cameFrom.has(c)) { c = cameFrom.get(c)!; path.unshift(c); }
-      return { path, cost: gScore.get(goalId) ?? Infinity, found: true };
-    }
-    open.delete(current);
-    const neighbors = graph.adj.get(current) ?? [];
-    for (const nb of neighbors) {
-      const tentative = (gScore.get(current) ?? Infinity) + nb.cost;
-      if (tentative < (gScore.get(nb.to) ?? Infinity)) {
-        cameFrom.set(nb.to, current);
-        gScore.set(nb.to, tentative);
-        fScore.set(nb.to, tentative + h(nb.to));
-        open.add(nb.to);
+    if (closed.has(current.id)) continue; // устаревшая запись в очереди — пропускаем
+    closed.add(current.id);
+
+    const g = gScore.get(current.id)!;
+    for (const { node, edge } of graph.adjacency.get(current.id) ?? []) {
+      if (closed.has(node.id)) continue;
+      const tentative = g + edgeCost(graph, edge);
+      if (tentative < (gScore.get(node.id) ?? Infinity)) {
+        gScore.set(node.id, tentative);
+        cameFrom.set(node.id, { nodeId: current.id, edge });
+        open.push({ id: node.id, f: tentative + heuristic(node, goal) });
       }
     }
   }
-  return { path: [], cost: Infinity, found: false };
+  return null; // цель недостижима
 }

@@ -1,76 +1,45 @@
-// Нечёткий поиск комнат, узлов и уличных объектов через fuse.js
+/** Нечёткий поиск локаций -> Place (id = узел графа, до которого строим путь). */
 import Fuse from 'fuse.js';
-import { demoCampus } from '../data/demoCampus';
-import { getOutdoorData, buildingEntranceNode } from '../data/campusOutdoor';
-import type { PlaceRef } from '../data/types';
+import type { CampusData, Place } from '../data/types';
+import { formatFloor } from './format';
 
-export interface SearchResult {
-  place: PlaceRef;
-  subtitle: string;
-  group: 'Помещения' | 'Корпуса и вход' | 'Улица';
-}
+export function buildSearchIndex(campus: CampusData): Place[] {
+  const out: Place[] = [];
+  const bName = (id?: string) => campus.buildings.find((b) => b.id === id)?.shortName ?? '';
 
-function buildIndex(): SearchResult[] {
-  const items: SearchResult[] = [];
-  // Комнаты внутренних зданий
-  for (const b of demoCampus.buildings) {
-    for (const r of b.rooms) {
-      if (r.type === 'corridor') continue; // коридоры не ищем как цели — они и так часть пути
-      const floor = b.floors.find((f) => f.id === r.floorId);
-      items.push({
-        place: { kind: 'room', id: r.id, buildingId: b.id, name: r.name },
-        subtitle: `${b.name} · ${floor?.name ?? ''}`,
-        group: 'Помещения',
-      });
-    }
-    for (const n of b.nodes) {
-      if (n.type === 'entrance' || n.type === 'stairs' || n.type === 'poi') {
-        items.push({
-          place: { kind: 'node', id: n.id, buildingId: b.id, name: n.label ?? n.id },
-          subtitle: b.name,
-          group: 'Помещения',
-        });
-      }
-    }
-  }
-  // Уличные здания (входы)
-  const outdoor = getOutdoorData();
-  for (const ob of outdoor.buildings) {
-    if (ob.id === 'stadium') continue;
-    items.push({
-      place: { kind: 'building-entrance', id: buildingEntranceNode[ob.id] ?? ob.id, buildingId: ob.id, name: `Вход: ${ob.name}` },
-      subtitle: ob.address ?? '',
-      group: 'Корпуса и вход',
+  for (const room of campus.rooms) {
+    const anchor = room.doorNodes[0];
+    if (!anchor) continue;
+    out.push({
+      id: anchor, name: room.name, category: 'room',
+      floor: room.floor, buildingId: room.buildingId,
+      description: `${bName(room.buildingId)}, каб. ${room.number}, ${formatFloor(room.floor)}`,
     });
   }
-  // Уличные узлы
-  for (const n of outdoor.nodes) {
-    items.push({
-      place: { kind: 'outdoor', id: n.id, name: n.label },
-      subtitle: 'Уличный маршрут',
-      group: 'Улица',
+  for (const b of campus.buildings) {
+    const door = campus.doors.find((d) => d.buildingId === b.id);
+    if (!door) continue;
+    out.push({ id: door.outdoorNode, name: b.shortName, category: 'building', description: 'вход в здание' });
+  }
+  for (const n of campus.nodes) {
+    if (!n.label || n.type === 'room') continue;
+    out.push({
+      id: n.id, name: n.label, category: 'outdoor',
+      description: (n.type === 'street' || n.type === 'plaza') ? 'на улице' : 'внутри здания',
     });
   }
-  return items;
+  return out;
 }
 
-const allItems = buildIndex();
-const fuse = new Fuse(allItems, {
-  keys: [{ name: 'place.name', weight: 2 }, { name: 'subtitle', weight: 0.5 }],
-  threshold: 0.42,
-  ignoreLocation: true,
-  minMatchCharLength: 1,
-});
+export function createSearcher(items: Place[]): Fuse<Place> {
+  return new Fuse(items, {
+    keys: [{ name: 'name', weight: 0.7 }, { name: 'description', weight: 0.3 }],
+    threshold: 0.4, ignoreLocation: true,
+  });
+}
 
-/** Поиск с учётом русского языка: "лаборатория", "204", "туалет", "лестница", "вход" */
-export function searchPlaces(query: string, limit = 8): SearchResult[] {
-  const q = query.trim().toLowerCase();
+export function searchLocations(searcher: Fuse<Place>, query: string, limit = 8): Place[] {
+  const q = query.trim();
   if (!q) return [];
-  const res = fuse.search(q, { limit });
-  return res.map((r) => r.item);
-}
-
-/** Все уличные точки для выпадающего списка "Кампус" */
-export function outdoorPlaces(): SearchResult[] {
-  return allItems.filter((i) => i.group !== 'Помещения');
+  return searcher.search(q, { limit }).map((r) => r.item);
 }

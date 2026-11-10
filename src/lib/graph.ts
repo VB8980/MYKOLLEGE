@@ -1,58 +1,59 @@
-// Построение графов: внутренний (здание) и уличный (кампус)
-import type { Building, NavEdge, NavNode } from '../data/types';
-import type { OutdoorCampusData, OutdoorEdge, OutdoorNode } from '../data/campusOutdoor';
-import { dist2 } from './geometry';
+/**
+ * graph.ts — построение графа навигации из данных кампуса.
+ *
+ * CampusData содержит плоские списки узлов (NavNode) и рёбер (NavEdge).
+ * Здесь они превращаются в структуру, удобную для обходов (A*, BFS):
+ *   - nodeById  — быстрый доступ к узлу по id;
+ *   - adjacency — список смежности: для каждого узла массив {node, edge}.
+ *
+ * Рёбра с bidirectional !== false добавляются в обе стороны;
+ * направленные (например, «только выход» из комнаты) — только from -> to.
+ */
 
-export interface WeightedGraph<N extends { id: string }> {
-  nodes: Map<string, N>;
-  adj: Map<string, { to: string; cost: number; edgeType: string }[]>;
+import type { CampusData, NavEdge, NavNode } from '../data/types';
+
+/** Запись списка смежности: соседний узел и ведущее к нему ребро. */
+export interface AdjacencyEntry {
+  node: NavNode;
+  edge: NavEdge;
 }
 
-export interface GraphBuildOptions {
-  avoidStairs?: boolean;      // режим "без лестниц"
-  stairsPenalty?: number;     // штраф за лестницу (метры экв.)
+/** Готовый граф навигации. */
+export interface Graph {
+  nodeById: Map<string, NavNode>;
+  adjacency: Map<string, AdjacencyEntry[]>;
 }
 
-/** Внутренний граф здания: стоимость walk-рёбра = расстояние, stairs/door — расстояние + штраф */
-export function buildIndoorGraph(b: Building, opts: GraphBuildOptions = {}): WeightedGraph<NavNode> {
-  const nodes = new Map<string, NavNode>(b.nodes.map((n) => [n.id, n]));
-  const adj = new Map<string, { to: string; cost: number; edgeType: string }[]>();
-  const floorById = new Map(b.floors.map((f) => [f.id, f]));
-  const fh = b.floorHeight;
+/**
+ * Собирает граф из CampusData.
+ * Пропущенные ссылки (ребро на несуществующий узел) игнорируются молча —
+ * корректность данных проверяется отдельно в src/data/validation.ts.
+ */
+export function buildGraph(campus: CampusData): Graph {
+  const nodeById = new Map<string, NavNode>();
+  const adjacency = new Map<string, AdjacencyEntry[]>();
 
-  const addEdge = (e: NavEdge) => {
-    const a = nodes.get(e.from), c = nodes.get(e.to);
-    if (!a || !c) return;
-    const flatDist = dist2(a.pos, c.pos);
-    const dy = Math.abs((floorById.get(a.floorId)?.level ?? 0) - (floorById.get(c.floorId)?.level ?? 0)) * fh;
-    let cost = Math.max(flatDist, 0.01);
-    if (e.type === 'stairs') {
-      if (opts.avoidStairs) return; // исключаем лестницы из графа
-      cost = Math.hypot(flatDist, dy) + (opts.stairsPenalty ?? 15);
-    } else if (e.type === 'door') {
-      cost += 2; // небольшой штраф на вход в дверь
-    } else if (e.type === 'elevator') {
-      cost += 10;
-    }
-    if (!adj.has(e.from)) adj.set(e.from, []);
-    if (!adj.has(e.to)) adj.set(e.to, []);
-    adj.get(e.from)!.push({ to: e.to, cost, edgeType: e.type });
-    adj.get(e.to)!.push({ to: e.from, cost, edgeType: e.type });
-  };
-  for (const e of b.edges) addEdge(e);
-  return { nodes, adj };
-}
-
-/** Уличный граф кампуса: стоимость ребра = расстояние в метрах из данных */
-export function buildOutdoorGraph(data: OutdoorCampusData): WeightedGraph<OutdoorNode> {
-  const nodes = new Map<string, OutdoorNode>(data.nodes.map((n) => [n.id, n]));
-  const adj = new Map<string, { to: string; cost: number; edgeType: string }[]>();
-  for (const [from, to, dist] of data.edges as OutdoorEdge[]) {
-    if (!nodes.has(from) || !nodes.has(to)) continue;
-    if (!adj.has(from)) adj.set(from, []);
-    if (!adj.has(to)) adj.set(to, []);
-    adj.get(from)!.push({ to, cost: dist, edgeType: 'walk' });
-    adj.get(to)!.push({ to: from, cost: dist, edgeType: 'walk' });
+  // Индексируем узлы и заводим пустые списки смежности.
+  for (const node of campus.nodes) {
+    nodeById.set(node.id, node);
+    adjacency.set(node.id, []);
   }
-  return { nodes, adj };
+
+  const addArc = (edge: NavEdge) => {
+    const to = nodeById.get(edge.to);
+    if (!nodeById.has(edge.from) || !to) return; // битая ссылка — пропускаем
+    adjacency.get(edge.from)!.push({ node: to, edge });
+  };
+
+  for (const edge of campus.edges) {
+    // Направленными считаются только явно bidirectional === false.
+    const directed = edge.bidirectional === false;
+    addArc(edge);
+    if (!directed) {
+      // Обратная дуга: тот же тип ребра, но развёрнутые from/to.
+      addArc({ ...edge, from: edge.to, to: edge.from });
+    }
+  }
+
+  return { nodeById, adjacency };
 }

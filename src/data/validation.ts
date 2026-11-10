@@ -4,8 +4,8 @@
  * а в DEV-режиме дополнительно печатаются в консоль.
  */
 
-import type { CampusData, NavEdge, NavNode } from '../data/types';
-import { DEMO_CAMPUS } from '../data/demoCampus';
+import type { CampusData, NavEdge, NavNode } from './types';
+import { DEMO_CAMPUS } from './demoCampus';
 
 export interface ValidationResult {
   errors: string[];

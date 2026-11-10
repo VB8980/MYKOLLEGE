@@ -1,135 +1,158 @@
-// Генерация пошаговых инструкций на русском языке
-import type { Building, RoutePoint, RouteStep } from '../data/types';
-import type { OutdoorNode } from '../data/campusOutdoor';
-import { signedAngleDeg } from './geometry';
-
-const num = (n: number) => Math.round(n);
-
 /**
- * Инструкции по внутренней части маршрута.
- * points — 3D-точки маршрута (уже с учётом этажей), nodeIds — id узлов.
+ * Генерация богатых пошаговых инструкций (Модель А).
+ * Каждый RouteStep несёт at/to (Vec3), headingIn/Out (градусы), tStart/tEnd (сек),
+ * segmentIndex и icon — это то, что камера и UI используют напрямую.
+ * segmentDistance вызывается УЗЛАМИ (не позициями) — так требует geometry.ts.
  */
-export function indoorInstructions(
-  b: Building,
-  pts: RoutePoint[],
-  startLabel: string,
-  endLabel: string,
-): RouteStep[] {
-  const steps: RouteStep[] = [];
-  if (pts.length < 2) return [{ text: `Вы уже на месте: ${endLabel}`, floorId: pts[0]?.floorId ?? null, atDistance: 0 }];
+import type {
+  NavEdge, NavNode, RouteSegment, RouteStep, InstructionKind, ManeuverIcon, Vec3,
+} from '../data/types';
+import { segmentDistance } from './geometry';
+import { formatDistance, formatFloor } from './format';
 
-  const nodeById = new Map(b.nodes.map((n) => [n.id, n]));
-  const roomByNodeId = new Map<string, string>(); // nodeId -> имя комнаты через дверь
-  for (const d of b.doors) {
-    const room = b.rooms.find((r) => r.id === d.roomId);
-    if (room) roomByNodeId.set(d.nodeId, room.name);
-  }
+export const WALK_SPEED = 1.3; // м/с
 
-  steps.push({ text: `Начните движение: ${startLabel}`, floorId: pts[0].floorId, atDistance: 0 });
-
-  let acc = 0;
-  let prevDir: [number, number] | null = null;
-
-  for (let i = 1; i < pts.length; i++) {
-    const a = pts[i - 1], c = pts[i];
-    const segLen = Math.hypot(c.x - a.x, c.z - a.z, c.y - a.y);
-    acc += segLen;
-
-    // Переход между этажами (лестница)
-    if (a.floorId !== c.floorId && a.floorId != null && c.floorId != null) {
-      const fl = b.floors.find((f) => f.id === c.floorId);
-      const goingUp = (fl?.level ?? 0) > (b.floors.find((f) => f.id === a.floorId)?.level ?? 0);
-      steps.push({
-        text: `${goingUp ? 'Поднимитесь' : 'Спуститесь'} по лестнице на ${fl?.name ?? 'другой этаж'}`,
-        floorId: c.floorId, atDistance: acc,
-      });
-      prevDir = null;
-      continue;
-    }
-
-    const dx = c.x - a.x, dz = c.z - a.z;
-    if (Math.hypot(dx, dz) < 0.05) continue;
-    const dir: [number, number] = [dx, dz];
-
-    // Поворот?
-    if (prevDir) {
-      const ang = signedAngleDeg(prevDir[0], prevDir[1], dir[0], dir[1]);
-      if (Math.abs(ang) > 45) {
-        steps.push({ text: ang > 0 ? 'Поверните направо' : 'Поверните налево', floorId: c.floorId, atDistance: acc });
-      }
-    }
-
-    // Ориентир-комната рядом с узлом (дверь)
-    const landmark = roomByNodeId.get(c.nodeId);
-    // Тип узла назначения
-    const node = nodeById.get(c.nodeId);
-    const isLast = i === pts.length - 1;
-
-    if (isLast) {
-      if (node?.type === 'door') {
-        const rm = roomByNodeId.get(c.nodeId);
-        steps.push({ text: `Войдите через дверь${rm ? ` — ${rm}` : ''}`, floorId: c.floorId, atDistance: acc });
-      } else {
-        steps.push({ text: `Вы прибыли: ${endLabel}`, floorId: c.floorId, atDistance: acc });
-      }
-    } else if (landmark && node?.type === 'door') {
-      steps.push({ text: `Пройдите мимо кабинета «${landmark}»`, floorId: c.floorId, atDistance: acc });
-    } else if (segLen > 6) {
-      const corrName = b.rooms.find((r) => r.floorId === c.floorId && r.type === 'corridor')?.name;
-      steps.push({
-        text: `Идите прямо${corrName ? ` по ${corrName.toLowerCase()}` : ''} ${num(segLen)} метров`,
-        floorId: c.floorId, atDistance: acc,
-      });
-    }
-    prevDir = dir;
-  }
-
-  // Финальный шаг "X будет справа/слева" — упрощённо добавляем к последнему сегменту
-  const last = pts[pts.length - 1], secondLast = pts[pts.length - 2];
-  if (secondLast && last.floorId != null) {
-    const dx = last.x - secondLast.x, dz = last.z - secondLast.z;
-    const side = dz >= 0 ? 'справа' : 'слева'; // для движения вдоль коридора с Z=-12 на север
-    if (Math.hypot(dx, dz) > 1) {
-      steps.push({ text: `${endLabel} находится ${side} от вас`, floorId: last.floorId, atDistance: acc });
-    }
-  }
-  return steps;
+/** Направление вектора (x,z) в градусах: 0 = +X, по часовой. */
+function heading(a: Vec3, b: Vec3): number {
+  const deg = (Math.atan2(b.z - a.z, b.x - a.x) * 180) / Math.PI;
+  return (deg + 360) % 360;
 }
 
-/** Инструкции для уличной части маршрута */
-export function outdoorInstructions(
-  pathIds: string[],
-  nodeById: Map<string, OutdoorNode>,
-  edgeDist: (a: string, b: string) => number,
-  startLabel: string,
-  targetBuildingName?: string,
+/** Классификация поворота по разнице заходов. */
+function turnKind(delta: number): InstructionKind {
+  const d = ((delta + 540) % 360) - 180; // в диапазон -180..180
+  const a = Math.abs(d);
+  if (a < 15) return 'straight';
+  if (a < 60) return d < 0 ? 'slight-left' : 'slight-right';
+  if (a < 130) return d < 0 ? 'turn-left' : 'turn-right';
+  if (a < 160) return d < 0 ? 'sharp-left' : 'sharp-right';
+  return 'uturn';
+}
+
+function iconFor(kind: InstructionKind): ManeuverIcon {
+  switch (kind) {
+    case 'start': return 'flag-start';
+    case 'straight': return 'arrow-straight';
+    case 'turn-left': case 'slight-left': case 'sharp-left': return 'arrow-left';
+    case 'turn-right': case 'slight-right': case 'sharp-right': return 'arrow-right';
+    case 'uturn': return 'arrow-straight';
+    case 'enter-building': case 'exit-building': return 'building';
+    case 'door-left': case 'door-right': return 'door';
+    case 'stairs-up': return 'stairs-up';
+    case 'stairs-down': return 'stairs-down';
+    case 'elevator-up': case 'elevator-down': return 'elevator';
+    case 'arrive-room': case 'arrive-outdoor': case 'finish': return 'flag-finish';
+  }
+}
+
+/** Группировка последовательных рёбер одного kind в сегменты. */
+export function buildSegments(path: NavNode[], edges: NavEdge[]): RouteSegment[] {
+  const segs: RouteSegment[] = [];
+  let cur: RouteSegment | null = null;
+  for (let i = 0; i < edges.length; i++) {
+    const e = edges[i];
+    const a = path[i], b = path[i + 1];
+    const dist = segmentDistance(a, b);
+    const sameKind = !!cur && cur.kind === e.kind &&
+      (e.kind !== 'vertical' || cur.toFloor === b.floor);
+    if (!sameKind) {
+      cur = {
+        kind: e.kind, nodeIds: [a.id, b.id], distance: dist,
+        fromFloor: a.floor, toFloor: b.floor, buildingId: b.buildingId ?? a.buildingId,
+      };
+      segs.push(cur);
+    } else {
+      cur!.nodeIds.push(b.id);
+      cur!.distance += dist;
+      cur!.toFloor = b.floor;
+    }
+  }
+  return segs;
+}
+
+/** Индекс сегмента, содержащего ребро i. */
+function segIndexForEdge(segs: RouteSegment[], edges: NavEdge[], i: number): number {
+  let acc = 0;
+  for (let s = 0; s < segs.length; s++) {
+    acc += segs[s].nodeIds.length - 1; // рёбер в сегменте
+    if (i < acc) return s;
+  }
+  return Math.max(0, segs.length - 1);
+}
+
+/** Собирает шаги с накопленным временем tStart/tEnd для полёта камеры. */
+export function generateSteps(
+  path: NavNode[], edges: NavEdge[], segments: RouteSegment[],
+  fromLabel: string, toLabel: string,
 ): RouteStep[] {
   const steps: RouteStep[] = [];
-  if (pathIds.length === 0) return steps;
-  steps.push({ text: `Начните движение: ${startLabel}`, floorId: null, atDistance: 0 });
+  if (path.length === 0) return steps;
 
-  let acc = 0;
-  let prevDir: [number, number] | null = null;
-  for (let i = 1; i < pathIds.length; i++) {
-    const a = nodeById.get(pathIds[i - 1])!, c = nodeById.get(pathIds[i])!;
-    const len = edgeDist(a.id, c.id);
-    acc += len;
-    const dir: [number, number] = [c.pos[0] - a.pos[0], c.pos[1] - a.pos[1]];
-    if (prevDir) {
-      const ang = signedAngleDeg(prevDir[0], prevDir[1], dir[0], dir[1]);
-      if (Math.abs(ang) > 45) steps.push({ text: ang > 0 ? 'На улице поверните направо' : 'На улице поверните налево', floorId: null, atDistance: acc });
-    }
-    // Особые узлы
-    if (c.id === 'n_alley') {
-      steps.push({ text: 'Перейдите Солнечную аллею по пешеходному переходу', floorId: null, atDistance: acc });
-    } else if (c.id === 'n_square') {
-      steps.push({ text: `Пройдите по Площади Шокина (${num(len)} м)`, floorId: null, atDistance: acc });
-    } else if (i === pathIds.length - 1 && targetBuildingName) {
-      steps.push({ text: `Войдите в ${targetBuildingName}`, floorId: null, atDistance: acc });
+  let cumDist = 0;
+  const push = (
+    kind: InstructionKind, text: string, at: Vec3, to: Vec3,
+    dist: number, hIn: number, hOut: number, segIdx: number,
+    node: NavNode, detail?: string,
+  ) => {
+    const tStart = cumDist / WALK_SPEED;
+    cumDist += dist;
+    const tEnd = cumDist / WALK_SPEED;
+    steps.push({
+      index: steps.length, kind, icon: iconFor(kind), text, detail,
+      at, to, distance: dist, headingIn: hIn, headingOut: hOut,
+      segmentIndex: segIdx, floor: node.floor, buildingId: node.buildingId,
+      tStart, tEnd,
+    });
+  };
+
+  const h0 = edges[0] ? heading(path[0].position, path[1].position) : 0;
+  push('start', `Начните движение от ${fromLabel}`,
+    path[0].position, path[0].position, 0, h0, h0, 0, path[0]);
+
+  for (let i = 1; i < path.length; i++) {
+    const prev = path[i - 1], cur = path[i], e = edges[i - 1];
+    const segIdx = segIndexForEdge(segments, edges, i - 1);
+    const hIn = heading(prev.position, cur.position);
+    const next = path[i + 1];
+    const hOut = next ? heading(cur.position, next.position) : hIn;
+    const d = segmentDistance(prev, cur);
+
+    if (e.kind === 'through-door') {
+      push('enter-building', `Войдите через ${cur.label ?? 'дверь'}`,
+        prev.position, cur.position, d, hIn, hOut, segIdx, cur);
+    } else if (e.kind === 'vertical') {
+      const up = (cur.floor ?? 0) > (prev.floor ?? 0);
+      const isElev = cur.type === 'elevator' || prev.type === 'elevator';
+      const lbl = cur.label ?? prev.label ?? '';
+      const isRamp = /пандус/i.test(lbl);
+      const kind: InstructionKind = isElev ? (up ? 'elevator-up' : 'elevator-down')
+                                            : (up ? 'stairs-up' : 'stairs-down');
+      const verb = isElev ? 'Воспользуйтесь лифтом'
+                   : isRamp ? (up ? 'Поднимитесь по пандусу' : 'Спуститесь по пандусу')
+                   : (up ? 'Поднимитесь по лестнице' : 'Спуститесь по лестнице');
+      push(kind, `${verb} до ${formatFloor(cur.floor ?? 0)}`,
+        prev.position, cur.position, d, hIn, hOut, segIdx, cur, cur.label);
+    } else if (e.kind === 'enter-room') {
+      push('arrive-room', `Войдите в ${cur.label ?? 'помещение'}`,
+        prev.position, cur.position, d, hIn, hOut, segIdx, cur);
+    } else if (e.kind === 'exit-building') {
+      push('exit-building', 'Выйдите из здания',
+        prev.position, cur.position, d, hIn, hOut, segIdx, cur);
     } else {
-      steps.push({ text: `Идите по дорожке ${num(len)} м → ${c.label}`, floorId: null, atDistance: acc });
+      const tk = turnKind(hOut - hIn);
+      if (tk === 'straight') {
+        push('straight', `Идите прямо ${formatDistance(d)}`,
+          prev.position, cur.position, d, hIn, hOut, segIdx, cur);
+      } else {
+        const word = tk.includes('left') ? 'налево' : tk.includes('right') ? 'направо' : 'развернитесь';
+        push(tk, `Поверните ${word}`, prev.position, cur.position, d, hIn, hOut, segIdx, cur);
+      }
     }
-    prevDir = dir;
   }
+
+  const last = path[path.length - 1];
+  const lastH = steps.length ? steps[steps.length - 1].headingOut : 0;
+  push(last.buildingId ? 'finish' : 'arrive-outdoor', `Вы прибыли: ${toLabel}`,
+    last.position, last.position, 0, lastH, lastH, Math.max(0, segments.length - 1), last);
   return steps;
 }
