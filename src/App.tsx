@@ -1,5 +1,5 @@
 import { Canvas } from '@react-three/fiber';
-import { CONFIG } from './config';
+import { CONFIG } from './lib/config';
 
 /**
  * Корневой компонент приложения Campus Navigator 3D.
