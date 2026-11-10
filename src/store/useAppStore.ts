@@ -4,6 +4,7 @@
 import { create } from 'zustand';
 import type { Place, Route } from '../data/types';
 import { DEMO_CAMPUS } from '../data/demoCampus';
+import type { LayoutSnapshot } from '../lib/layoutIO';
 import { buildGraph, type Graph } from '../lib/graph';
 import { findPath } from '../lib/astar';
 import { transformRoute } from '../lib/routeTransform';
@@ -45,6 +46,12 @@ interface AppState {
   arrived: boolean;
   cameraResetTick: number;
 
+  // --- редактор трассировки (этап 3) ---
+  editorOpen: boolean;
+  /** hot-reload геометрии: снимок layout из редактора (null = дефолт campusLayout.ts) */
+  layoutOverride: LayoutSnapshot | null;
+  satOpacity: number;
+
   // Сигнатуры методов (только типы, без реализаций)
   setFrom: (p: Place | null) => void;
   setTo: (p: Place | null) => void;
@@ -69,6 +76,9 @@ interface AppState {
   resetCamera: () => void;
   search: (q: string) => Place[];
   demoRun: () => void;
+  setEditorOpen: (v: boolean) => void;
+  setSatOpacity: (v: number) => void;
+  applyLayoutOverride: (s: LayoutSnapshot | null) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -92,6 +102,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeStep: -1,
   arrived: false,
   cameraResetTick: 0,
+
+  editorOpen: false,
+  layoutOverride: null,
+  satOpacity: 0.55,
 
   // Реализации методов
   setFrom: (p) => set({ from: p, route: null, routeError: null }),
@@ -155,6 +169,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   setAvoidStairs: (v) => { set({ avoidStairs: v }); if (get().route) get().computeRoute(); },
   resetCamera: () => set({ cameraResetTick: get().cameraResetTick + 1, animState: 'idle', cameraMode: 'overview' }),
   search: (q) => searchLocations(searcher, q),
+
+  // --- редактор трассировки ---
+  setEditorOpen: (v) => set({ editorOpen: v, ...(v ? { animState: 'idle' as AnimState } : {}) }),
+  setSatOpacity: (v) => set({ satOpacity: Math.min(1, Math.max(0, v)) }),
+  applyLayoutOverride: (s) => set({ layoutOverride: s }),
 
   // Сквозное демо по РЕАЛЬНОМУ плану корпуса 1
   demoRun: () => {

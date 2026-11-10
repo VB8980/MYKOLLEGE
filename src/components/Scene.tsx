@@ -4,9 +4,9 @@
  * чёрного, приглушённое золото кантов, кремовый текст, мягкий объёмный свет,
  * виньетка по краям. Без кислотного неона.
  */
-import { Suspense, useMemo } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Html, Line, useTexture } from '@react-three/drei';
+import { OrbitControls, Html, Line } from '@react-three/drei';
 import * as THREE from 'three';
 import { useAppStore } from '../store/useAppStore';
 import type { Building, NavEdge, NavNode, Room, Vec3 } from '../data/types';
@@ -14,6 +14,7 @@ import {
   PLAZA, ROADS, SAT_BOUNDS, SAT_OPACITY, SAT_URL, STADIUM, BUILDING_LEVELS,
   lx, ly, roadToWorldPoints, type Pt,
 } from '../data/campusLayout';
+import { TraceEditor } from './editor/TraceEditor';
 
 /* ---------- палитра: тёплый графит + приглушённое золото ---------- */
 const C = {
@@ -43,6 +44,21 @@ const C = {
 
 const toTuple = (v: Vec3): [number, number, number] => [v.x, v.y, v.z];
 const dist2 = (a: Vec3, b: Vec3) => Math.hypot(b.x - a.x, b.z - a.z);
+
+/**
+ * Активная геометрия layout: дефолт из campusLayout.ts либо hot-reload-снимок
+ * из редактора трассировки (store.layoutOverride). SAT_BOUNDS — константа модуля;
+ * override меняет её через satBounds ниже.
+ */
+export function useLayoutGeom() {
+  const ov = useAppStore((s) => s.layoutOverride);
+  return useMemo(() => ({
+    plaza: ov?.plaza ?? PLAZA,
+    stadium: ov?.stadium ?? STADIUM,
+    roads: ov?.roads ?? ROADS,
+    satBounds: ov?.satBounds ?? SAT_BOUNDS,
+  }), [ov]);
+}
 
 /* ---------- корпус: gunmetal-плита с золотым кантом ---------- */
 function BuildingBox({ b }: { b: Building }) {
@@ -86,28 +102,30 @@ function BuildingBox({ b }: { b: Building }) {
 }
 
 function StadiumField() {
-  const cx = lx(STADIUM.center), cz = ly(STADIUM.center);
+  const geom = useLayoutGeom();
+  const ST = geom.stadium;
+  const cx = lx(ST.center), cz = ly(ST.center);
   const oval = useMemo(() => {
     const pts: [number, number, number][] = [];
     for (let i = 0; i <= 64; i++) {
       const a = (i / 64) * Math.PI * 2;
-      pts.push([cx + Math.cos(a) * STADIUM.rx, 0.05, cz + Math.sin(a) * STADIUM.ry]);
+      pts.push([cx + Math.cos(a) * ST.rx, 0.05, cz + Math.sin(a) * ST.ry]);
     }
     return pts;
-  }, [cx, cz]);
+  }, [cx, cz, ST]);
   const inner = useMemo(() => {
     const pts: [number, number, number][] = [];
     for (let i = 0; i <= 64; i++) {
       const a = (i / 64) * Math.PI * 2;
-      pts.push([cx + Math.cos(a) * (STADIUM.rx - 9), 0.06, cz + Math.sin(a) * (STADIUM.ry - 7)]);
+      pts.push([cx + Math.cos(a) * (ST.rx - 9), 0.06, cz + Math.sin(a) * (ST.ry - 7)]);
     }
     return pts;
-  }, [cx, cz]);
-  const fw = STADIUM.fieldW, fh = STADIUM.fieldH;
+  }, [cx, cz, ST]);
+  const fw = ST.fieldW, fh = ST.fieldH;
   return (
     <group position={[cx, 0, cz]}>
       {/* чаша овала */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.04, 0]} scale={[STADIUM.rx / 60, STADIUM.ry / 60, 1]}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.04, 0]} scale={[ST.rx / 60, ST.ry / 60, 1]}>
         <circleGeometry args={[60, 56]} />
         <meshStandardMaterial color={C.field} roughness={1} />
       </mesh>
@@ -126,32 +144,41 @@ function StadiumField() {
       <Html position={[0, 2, 0]} center distanceFactor={210} zIndexRange={[8, 0]}>
         <div className="pointer-events-none whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-medium backdrop-blur"
           style={{ borderColor: 'rgba(201,151,63,0.3)', background: C.labelBg, color: C.label }}>
-          {STADIUM.name}
+          {ST.name}
         </div>
       </Html>
     </group>
   );
 }
 
-/** Слой подложки: /satellite.jpg на земле (public/satellite.jpg), opacity SAT_OPACITY. */
+/** Слой подложки: /satellite.jpg на земле (public/satellite.jpg), opacity из store (дефолт SAT_OPACITY). */
 function SatelliteUnderlay() {
-  const [minX, minY, maxX, maxY] = SAT_BOUNDS;
+  const geom = useLayoutGeom();
+  const [minX, minY, maxX, maxY] = geom.satBounds;
+  const satOpacity = useAppStore((s) => s.satOpacity);
   const w = maxX - minX, d = maxY - minY;
   const cx = (minX + maxX) / 2, cz = -(minY + maxY) / 2;
-  const tex = useTexture(SAT_URL);
-  // если файла нет — подложка просто не отрисуется (404), векторный слой работает
+  //Tex — мягкая загрузка без Suspense: если файла нет (404) — рисуем только вектор.
+  const [tex, setTex] = useState<THREE.Texture | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const loader = new THREE.TextureLoader();
+    loader.load(SAT_URL, (t) => { if (alive) setTex(t); }, undefined, () => { if (alive) setTex(null); });
+    return () => { alive = false; };
+  }, []);
   if (!tex) return null;
   return (
     <mesh rotation={[-Math.PI / 2, 0, 0]} position={[cx, 0.015, cz]}>
       <planeGeometry args={[w, d]} />
-      <meshBasicMaterial map={tex} transparent opacity={SAT_OPACITY} depthWrite={false} />
+      <meshBasicMaterial map={tex} transparent opacity={satOpacity > 0 ? satOpacity : SAT_OPACITY} depthWrite={false} />
     </mesh>
   );
 }
 
-/** Площадь Шокина — светлое пятно-полигон из layout. */
+/** Площадь Шокина — светлое пятно-полигон из layout (или override редактора). */
 function PlazaSpot() {
-  const poly = useMemo(() => PLAZA.polygon.map((p: Pt) => new THREE.Vector3(lx(p), 0.04, ly(p))), []);
+  const geom = useLayoutGeom();
+  const poly = useMemo(() => geom.plaza.polygon.map((p: Pt) => new THREE.Vector3(lx(p), 0.04, ly(p))), [geom.plaza]);
   const geo = useMemo(() => {
     const shape = new THREE.Shape();
     poly.forEach((v, i) => (i === 0 ? shape.moveTo(v.x, v.z) : shape.lineTo(v.x, v.z)));
@@ -169,12 +196,16 @@ function PlazaSpot() {
   );
 }
 
-/* ---------- дороги: полилинии-аллеи + тонкие отводы к дверям ---------- */
+/* ---------- дороги: полилинии-аллеи из layout + тонкие отводы к дверям ---------- */
 function Roads({ nodes, edges }: { nodes: NavNode[]; edges: NavEdge[] }) {
+  const geom = useLayoutGeom();
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
-  const ribbons = useMemo(() => ROADS.filter((r) => r.id !== 'road.bridge')
-    .map((r) => roadToWorldPoints(r.pts as Pt[], 0.12)), []);
-  const bridge = useMemo(() => roadToWorldPoints(ROADS.find((r) => r.id === 'road.bridge')!.pts as Pt[], 6.5), []);
+  const ribbons = useMemo(() => geom.roads.filter((r) => r.surface !== 'bridge')
+    .map((r) => roadToWorldPoints(r.pts as Pt[], 0.12)), [geom.roads]);
+  const bridge = useMemo(() => {
+    const br = geom.roads.find((r) => r.surface === 'bridge');
+    return br ? roadToWorldPoints(br.pts as Pt[], 6.5) : [];
+  }, [geom.roads]);
   const taps = useMemo(() => {
     const out: [number, number, number][][] = [];
     for (const e of edges) {
@@ -338,6 +369,7 @@ function Overlay() {
         <div className="pointer-events-auto flex flex-col items-end gap-2">
           <div className="flex gap-2">
             <button className={`${btn} ${btnHover}`} style={btnStyle} onClick={() => act().setViewMode(viewMode === 'campus' ? 'indoor' : 'campus')}>{viewMode === 'campus' ? 'Внутри' : 'Кампус'}</button>
+            <button className={`${btn} ${btnHover}`} style={btnStyle} onClick={() => act().setEditorOpen(true)}>Трассировка</button>
             <button className={`${btn} ${btnHover}`} style={btnStyle} onClick={() => act().setShowGraph(!showGraph)}>Граф</button>
             <button className={`${btn} ${btnHover}`} style={btnStyle} onClick={() => act().resetCamera()}>Сброс камеры</button>
           </div>
@@ -402,6 +434,7 @@ export function Scene() {
       </Canvas>
       <Compass />
       <Overlay />
+      <TraceEditor />
     </div>
   );
 }
