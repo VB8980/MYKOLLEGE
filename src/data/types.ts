@@ -60,6 +60,8 @@ export interface Room {
   rect: Rect;
   /** Двери комнаты (точки графа внутри комнаты у стены) */
   doorNodes: string[];
+  /** Точность плана: 'exact' — по обмеру/таблице, 'recon' — реконструкция (аддитивно). */
+  confidence?: 'exact' | 'recon';
 }
 
 export type RoomKind =
