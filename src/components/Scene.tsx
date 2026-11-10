@@ -4,12 +4,16 @@
  * чёрного, приглушённое золото кантов, кремовый текст, мягкий объёмный свет,
  * виньетка по краям. Без кислотного неона.
  */
-import { useMemo } from 'react';
+import { Suspense, useMemo } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Html, Line } from '@react-three/drei';
+import { OrbitControls, Html, Line, useTexture } from '@react-three/drei';
 import * as THREE from 'three';
 import { useAppStore } from '../store/useAppStore';
 import type { Building, NavEdge, NavNode, Room, Vec3 } from '../data/types';
+import {
+  PLAZA, ROADS, SAT_BOUNDS, SAT_OPACITY, SAT_URL, STADIUM, BUILDING_LEVELS,
+  lx, ly, roadToWorldPoints, type Pt,
+} from '../data/campusLayout';
 
 /* ---------- палитра: тёплый графит + приглушённое золото ---------- */
 const C = {
@@ -44,7 +48,7 @@ const dist2 = (a: Vec3, b: Vec3) => Math.hypot(b.x - a.x, b.z - a.z);
 function BuildingBox({ b }: { b: Building }) {
   const w = b.footprint.maxX - b.footprint.minX;
   const d = b.footprint.maxZ - b.footprint.minZ;
-  const h = (b.levels.length || 1) * 3.2;
+  const h = (BUILDING_LEVELS[b.id] ?? b.levels.length ?? 1) * 3.2; // экструзия footprint, высота levels*3.2
   const cx = (b.footprint.minX + b.footprint.maxX) / 2;
   const cz = (b.footprint.minZ + b.footprint.maxZ) / 2;
   const indoor = useAppStore((s) => s.viewMode === 'indoor');
@@ -82,49 +86,101 @@ function BuildingBox({ b }: { b: Building }) {
 }
 
 function StadiumField() {
+  const cx = lx(STADIUM.center), cz = ly(STADIUM.center);
+  const oval = useMemo(() => {
+    const pts: [number, number, number][] = [];
+    for (let i = 0; i <= 64; i++) {
+      const a = (i / 64) * Math.PI * 2;
+      pts.push([cx + Math.cos(a) * STADIUM.rx, 0.05, cz + Math.sin(a) * STADIUM.ry]);
+    }
+    return pts;
+  }, [cx, cz]);
+  const inner = useMemo(() => {
+    const pts: [number, number, number][] = [];
+    for (let i = 0; i <= 64; i++) {
+      const a = (i / 64) * Math.PI * 2;
+      pts.push([cx + Math.cos(a) * (STADIUM.rx - 9), 0.06, cz + Math.sin(a) * (STADIUM.ry - 7)]);
+    }
+    return pts;
+  }, [cx, cz]);
+  const fw = STADIUM.fieldW, fh = STADIUM.fieldH;
   return (
-    <group position={[65, 0, -182]}>
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.05, 0]}>
+    <group position={[cx, 0, cz]}>
+      {/* чаша овала */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.04, 0]} scale={[STADIUM.rx / 60, STADIUM.ry / 60, 1]}>
         <circleGeometry args={[60, 56]} />
         <meshStandardMaterial color={C.field} roughness={1} />
       </mesh>
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.06, 0]}>
-        <ringGeometry args={[52, 55, 56]} />
-        <meshBasicMaterial color={C.fieldLine} transparent opacity={0.45} />
+      <Line points={oval} color={C.fieldLine} lineWidth={1.5} transparent opacity={0.5} />
+      <Line points={inner} color={C.fieldLine} lineWidth={1} transparent opacity={0.35} />
+      {/* поле с разметкой линиями */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.07, 0]}>
+        <planeGeometry args={[fw, fh]} />
+        <meshStandardMaterial color="#41503e" roughness={1} />
       </mesh>
+      <lineSegments rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.08, 0]}>
+        <edgesGeometry args={[new THREE.PlaneGeometry(fw, fh)]} />
+        <lineBasicMaterial color={C.fieldLine} transparent opacity={0.6} />
+      </lineSegments>
+      <Line points={[[0, 0.08, -fh / 2], [0, 0.08, fh / 2]]} color={C.fieldLine} lineWidth={1} transparent opacity={0.5} />
       <Html position={[0, 2, 0]} center distanceFactor={210} zIndexRange={[8, 0]}>
         <div className="pointer-events-none whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-medium backdrop-blur"
           style={{ borderColor: 'rgba(201,151,63,0.3)', background: C.labelBg, color: C.label }}>
-          Стадион МИЭТ
+          {STADIUM.name}
         </div>
       </Html>
     </group>
   );
 }
 
-function PlazaSpot() {
+/** Слой подложки: /satellite.jpg на земле (public/satellite.jpg), opacity SAT_OPACITY. */
+function SatelliteUnderlay() {
+  const [minX, minY, maxX, maxY] = SAT_BOUNDS;
+  const w = maxX - minX, d = maxY - minY;
+  const cx = (minX + maxX) / 2, cz = -(minY + maxY) / 2;
+  const tex = useTexture(SAT_URL);
+  // если файла нет — подложка просто не отрисуется (404), векторный слой работает
+  if (!tex) return null;
   return (
-    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[105, 0.04, -45]}>
-      <circleGeometry args={[42, 48]} />
-      <meshStandardMaterial color={C.plaza} roughness={0.95} />
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[cx, 0.015, cz]}>
+      <planeGeometry args={[w, d]} />
+      <meshBasicMaterial map={tex} transparent opacity={SAT_OPACITY} depthWrite={false} />
     </mesh>
   );
 }
 
+/** Площадь Шокина — светлое пятно-полигон из layout. */
+function PlazaSpot() {
+  const poly = useMemo(() => PLAZA.polygon.map((p: Pt) => new THREE.Vector3(lx(p), 0.04, ly(p))), []);
+  const geo = useMemo(() => {
+    const shape = new THREE.Shape();
+    poly.forEach((v, i) => (i === 0 ? shape.moveTo(v.x, v.z) : shape.lineTo(v.x, v.z)));
+    shape.closePath();
+    return new THREE.ShapeGeometry(shape);
+  }, [poly]);
+  const outline = useMemo(() => [...poly.map((v) => [v.x, 0.05, v.z] as [number, number, number]), [poly[0].x, 0.05, poly[0].z] as [number, number, number]], [poly]);
+  return (
+    <group>
+      <mesh geometry={geo} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]}>
+        <meshStandardMaterial color="#3a3a45" roughness={0.95} />
+      </mesh>
+      <Line points={outline} color={C.edgeSoft} lineWidth={1} transparent opacity={0.4} />
+    </group>
+  );
+}
+
 /* ---------- дороги: полилинии-аллеи + тонкие отводы к дверям ---------- */
-function Roads({ nodes, edges, paths }: { nodes: NavNode[]; edges: NavEdge[]; paths: { nodeIds: string[]; width: number }[] }) {
+function Roads({ nodes, edges }: { nodes: NavNode[]; edges: NavEdge[] }) {
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
-  const mains = useMemo(() => paths.map((pt) => {
-    const pts: [number, number, number][] = [];
-    for (const id of pt.nodeIds) { const n = byId.get(id); if (n) pts.push([n.position.x, 0.12, n.position.z]); }
-    return pts;
-  }), [byId, paths]);
+  const ribbons = useMemo(() => ROADS.filter((r) => r.id !== 'road.bridge')
+    .map((r) => roadToWorldPoints(r.pts as Pt[], 0.12)), []);
+  const bridge = useMemo(() => roadToWorldPoints(ROADS.find((r) => r.id === 'road.bridge')!.pts as Pt[], 6.5), []);
   const taps = useMemo(() => {
     const out: [number, number, number][][] = [];
     for (const e of edges) {
       const a = byId.get(e.from), b = byId.get(e.to);
       if (!a || !b) continue;
-      if (dist2(a.position, b.position) > 50) continue;
+      if (dist2(a.position, b.position) > 60) continue;
       if (a.type === 'door-outdoor' || b.type === 'door-outdoor')
         out.push([[a.position.x, 0.1, a.position.z], [b.position.x, 0.1, b.position.z]]);
     }
@@ -132,12 +188,16 @@ function Roads({ nodes, edges, paths }: { nodes: NavNode[]; edges: NavEdge[]; pa
   }, [byId, edges]);
   return (
     <group>
-      {mains.map((s, i) => s.length > 1 && (
-        <Line key={'m' + i} points={s} color={C.road} lineWidth={5} transparent opacity={0.9} />
+      {/* широкие ленты дорог по полилиниям layout */}
+      {ribbons.map((s, i) => s.length > 1 && (
+        <Line key={'m' + i} points={s} color={C.road} lineWidth={9} transparent opacity={0.85} />
       ))}
-      {mains.map((s, i) => s.length > 1 && (
-        <Line key={'ml' + i} points={s.map((p) => [p[0], p[1] + 0.02, p[2]] as [number, number, number])} color={C.roadLine} lineWidth={1} transparent opacity={0.5} />
+      {/* тонкая осевая */}
+      {ribbons.map((s, i) => s.length > 1 && (
+        <Line key={'ml' + i} points={s.map((p) => [p[0], p[1] + 0.02, p[2]] as [number, number, number])} color={C.roadLine} lineWidth={1} transparent opacity={0.55} />
       ))}
+      {/* мост b1->ДК (пешеходный, линия 4 м, приподнят до уровня 2 этажа) */}
+      {bridge.length > 1 && <Line points={bridge} color={C.edgeSoft} lineWidth={4} transparent opacity={0.8} />}
       {taps.map((s, i) => <Line key={'t' + i} points={s} color={C.road} lineWidth={2.5} transparent opacity={0.7} />)}
     </group>
   );
@@ -330,8 +390,11 @@ export function Scene() {
         </mesh>
         <PlazaSpot />
         <StadiumField />
+        <Suspense fallback={null}>
+          <SatelliteUnderlay />
+        </Suspense>
         {campus.buildings.map((b) => <BuildingBox key={b.id} b={b} />)}
-        <Roads nodes={campus.nodes} edges={campus.edges} paths={campus.paths} />
+        <Roads nodes={campus.nodes} edges={campus.edges} />
         {viewMode === 'indoor' && activeFloor != null && <IndoorRooms rooms={campus.rooms} floor={activeFloor} buildingId={shownBuilding} />}
         <RouteLayer />
         <FlightCamera />
