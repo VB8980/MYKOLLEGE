@@ -38,11 +38,14 @@ function pr(poly: number[], conv: Conv): Rect {
 }
 const pr4 = (poly: number[], conv: Conv): [number,number,number,number] => { const r=pr(poly,conv); return [r.minX,r.minZ,r.maxX,r.maxZ]; };
 const pc = (poly: number[], conv: Conv): [number,number] => { const r=pr(poly,conv); return [(r.minX+r.maxX)/2,(r.minZ+r.maxZ)/2]; };
+/** 8 узлов кольца по центральной линии: Ю-углы/середина, З-середина, С-углы/середина, В-середина. */
 function ringPts(o: Rect): [number,number][] {
   const {minX:a,maxX:b,minZ:c,maxZ:d}=o, hx=(a+b)/2, hz=(c+d)/2;
   return [[b,c],[hx,c],[a,c],[a,hz],[a,d],[hx,d],[b,d],[b,hz]];
 }
 const R1 = pr([29,17,79,67],'xy');
+/** Северная грань кольца (для крепления моста b1→ДК): узлы c4(СЗ), c5(С-центр), c6(СВ). */
+const B1_NORTH_RING = ['si.b1.f1.c4', 'si.b1.f1.c5', 'si.b1.f1.c6'];
 
 const inNode=(id:string,type:NavNode['type'],x:number,y:number,z:number,b:string,f:number,label?:string,roomId?:string):NavNode=>
   ({id,type,position:{x,y,z},buildingId:b,floor:f,...(label?{label}:{}),...(roomId?{roomId}:{})});
