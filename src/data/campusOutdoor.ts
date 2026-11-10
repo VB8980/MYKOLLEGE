@@ -1,10 +1,15 @@
 /**
- * Улицы МИЭТ по топологии Яндекс-карты (пл. Шокина, 1). Север = -Z, восток = +X, метры.
- * Магистрали = полилинии близких узлов (шаг 25-35 м) -> рисуются как дороги, не паутина.
- * Каждое ребро <= ~45 м (соседство в polyline + короткие отводы к дверям).
- * Door-узлы do.* стоят в тротуаре у фасада и подключены к ближайшей магистрали.
+ * Уличный граф кампуса МИЭТ — ГЕНЕРИРУЕТСЯ ИЗ campusLayout.ts
+ * (единый источник уличной геометрии: footprints, roads-полилинии, doors).
+ *
+ * Layout: X — восток, Y — СЕВЕР; world: worldX = x, worldZ = -y.
+ * Вершины road-полилиний становятся узлами сети (sun*, cen*, pla*, wes*),
+ * длинные сегменты (>50 м) режутся промежуточными узлами, двери do.*
+ * подключаются отводом к ближайшему узлу. Старые id сохранены там, где
+ * на них завязаны маршруты (do.b1, sun4 -> переименован в sunN по индексу).
  */
 import type { Landmark, NavEdge, NavNode, OutdoorPath, Vec2 } from './types';
+import { DOORS, ROADS, lx, ly, type Pt, type Road } from './campusLayout';
 
 const v = (x: number, z: number): Vec2 => ({ x, z });
 const n = (id: string, type: NavNode['type'], x: number, z: number, label?: string): NavNode =>
@@ -13,52 +18,87 @@ const e = (from: string, to: string): NavEdge => ({ from, to, kind: 'street', bi
 const p = (id: string, name: string, nodeIds: string[], width: number, surface: OutdoorPath['surface']): OutdoorPath =>
   ({ id, name, nodeIds, width, surface });
 
+/* ---------- полилиния дороги -> цепочка узлов/рёбер ---------- */
+
+const MAX_EDGE = 50; // метры; более длинные сегменты делятся пополам
+
+interface Chain { nodes: NavNode[]; edges: NavEdge[]; path: OutdoorPath }
+
+function chainFromRoad(road: Road, prefix: string): Chain {
+  const pts = road.pts as Pt[];
+  const ids: string[] = [];
+  const nodes: NavNode[] = [];
+  for (let i = 0; i < pts.length; i++) {
+    const id = `${prefix}${i}`;
+    ids.push(id);
+    nodes.push(n(id, 'street', lx(pts[i]), ly(pts[i])));
+  }
+  // режем слишком длинные рёбра серединой сегмента (шаг навигации <= ~45 м)
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    if (Math.hypot(b[0] - a[0], b[1] - a[1]) > MAX_EDGE) {
+      const mid: Pt = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+      const midId = `${ids[i]}m`;
+      ids.splice(i + 1, 0, midId);
+      nodes.push(n(midId, 'street', lx(mid), ly(mid)));
+    }
+  }
+  const edges: NavEdge[] = [];
+  for (let i = 0; i < ids.length - 1; i++) edges.push(e(ids[i], ids[i + 1]));
+  return { nodes, edges, path: p(`path.${prefix}`, road.name, ids, road.width, road.surface) };
+}
+
+const roadOf = (rid: string): Road => ROADS.find((r) => r.id === rid)!;
+
+const sun = chainFromRoad(roadOf('road.sun'), 'sun');
+const cen = chainFromRoad(roadOf('road.central'), 'cen');
+const pla = chainFromRoad(roadOf('road.plaza'), 'pla');
+const wes = chainFromRoad(roadOf('road.west'), 'wes');
+// «Северное кольцо» и «Мост b1→dk» из layout — визуальные ленты; в уличный
+// граф не входят (мост — indoor passage edge в demoCampus, этап 2).
+
 export const OUTDOOR_NODES: NavNode[] = [
-  // Солнечная аллея — диагональ юг (запад-юг -> восток)
-  n('sun0','street',-235,125), n('sun1','street',-180,118,'Остановка «Запад»'),
-  n('sun2','street',-125,112), n('sun3','street',-70,108), n('sun4','street',-15,105,'Остановка «Главный вход»'),
-  n('sun5','street',40,104), n('sun6','street',95,106), n('sun7','street',150,112), n('sun8','street',178,120),
-  // Центральный проспект — вертикаль восток
-  n('cen0','street',178,-150), n('cen1','street',178,-105), n('cen2','street',178,-60),
-  n('cen3','street',178,-15), n('cen4','street',178,30), n('cen5','street',178,75),
-  // Площадь Шокина / аллея к порталу 1 и ДК
-  n('pla1','street',140,-30), n('pla2','plaza',105,-45,'Плац / площадь Шокина'), n('pla3','street',78,-70),
-  // Западная аллея (Протон / 3 / 4) в зазоре x=-130
-  n('wes1','street',-130,80), n('wes2','street',-130,45), n('wes3','street',-130,10),
-  n('wes4','street',-130,-25), n('wes5','street',-130,-60),
-  // Двери (тротуар у фасада)
-  n('do.b1','door-outdoor',73,-85,'Главный вход (портал)'),
-  n('do.dk','door-outdoor',77,-85,'Вход ДК МИЭТ'),
-  n('do.uk3','door-outdoor',-128,12,'Вход корпуса 3'),
-  n('do.uk4','door-outdoor',-133,-80,'Вход корпуса 4'),
-  n('do.proton','door-outdoor',-122,10,'Вход Протон (учебный)'),
-  n('do.college','door-outdoor',-150,108,'Вход колледжа'),
+  ...sun.nodes, ...cen.nodes, ...pla.nodes, ...wes.nodes,
+  // остановки на Солнечной аллее (сохранён прежний id sun4 для демо-маршрута)
+  n('sun4', 'plaza', -200, 108, 'Остановка «Запад»'),
+  n('stop.main', 'plaza', lx([0, -100]), ly([0, -100]), 'Остановка «Главный вход»'),
+  // двери — позиции из layout.DOORS (id сохранены)
+  ...DOORS.map((d) => n(d.id, 'door-outdoor', lx(d.pos), ly(d.pos), d.label)),
 ];
 
-export const OUTDOOR_EDGES: NavEdge[] = [
-  // SUN
-  e('sun0','sun1'), e('sun1','sun2'), e('sun2','sun3'), e('sun3','sun4'), e('sun4','sun5'),
-  e('sun5','sun6'), e('sun6','sun7'), e('sun7','sun8'),
-  // CENTRAL (cen6 = sun8 общий узел через координату -> связываем явно)
-  e('cen0','cen1'), e('cen1','cen2'), e('cen2','cen3'), e('cen3','cen4'), e('cen4','cen5'), e('cen5','sun8'),
-  // PLAZA (cen3 -> pla1 -> pla2 -> pla3 -> do.b1 ; pla3 -> do.dk)
-  e('cen3','pla1'), e('pla1','pla2'), e('pla2','pla3'), e('pla3','do.b1'), e('pla3','do.dk'),
-  // WEST (sun2 -> wes1..wes5)
-  e('sun2','wes1'), e('wes1','wes2'), e('wes2','wes3'), e('wes3','wes4'), e('wes4','wes5'),
-  // отводы дверей к магистралям
-  e('wes3','do.proton'), e('wes3','do.uk3'), e('wes5','do.uk4'), e('sun1','do.college'),
-];
+function nearestNode(nodes: NavNode[], pt: Pt): string | null {
+  let best: string | null = null, bd = Infinity;
+  for (const nd of nodes) {
+    const d = Math.hypot(nd.position.x - lx(pt), nd.position.z - ly(pt));
+    if (d < bd) { bd = d; best = nd.id; }
+  }
+  return best;
+}
 
-export const OUTDOOR_PATHS: OutdoorPath[] = [
-  p('path.sun','Солнечная аллея',['sun0','sun1','sun2','sun3','sun4','sun5','sun6','sun7','sun8'],8,'asphalt'),
-  p('path.central','Центральный проспект',['cen0','cen1','cen2','cen3','cen4','cen5','sun8'],6,'asphalt'),
-  p('path.plaza','Аллея площади Шокина',['cen3','pla1','pla2','pla3','do.b1'],5,'paving'),
-  p('path.west','Западная аллея',['sun2','wes1','wes2','wes3','wes4','wes5'],4,'paving'),
-];
+export const OUTDOOR_EDGES: NavEdge[] = (() => {
+  const edges: NavEdge[] = [...sun.edges, ...cen.edges, ...pla.edges, ...wes.edges];
+  const junctions = [...sun.nodes, ...cen.nodes, ...pla.nodes, ...wes.nodes];
+  // остановка «Главный вход» и спец-узел sun4 («Запад») — к ближайшей вершине SUN
+  for (const s of [{ id: 'sun4', pos: [-200, -108] as Pt }, { id: 'stop.main', pos: [0, -100] as Pt }]) {
+    const j = nearestNode(sun.nodes, s.pos);
+    if (j) edges.push(e(j, s.id));
+  }
+  // конец Аллеи площади (109,42) примыкает к порталу do.b1 (108.4,42)
+  edges.push(e(pla.path.nodeIds[pla.path.nodeIds.length - 1], 'do.b1'));
+  // каждая дверь -> ближайший узел сети
+  for (const d of DOORS) {
+    if (d.id === 'do.b1') continue;
+    const j = nearestNode(junctions, d.pos);
+    if (j) edges.push(e(j, d.id));
+  }
+  return edges;
+})();
+
+export const OUTDOOR_PATHS: OutdoorPath[] = [sun.path, cen.path, pla.path, wes.path];
 
 export const OUTDOOR_LANDMARKS: Landmark[] = [
-  { id:'lm.plaza', name:'Площадь Шокина', position:v(105,-45), icon:'🟫' },
-  { id:'lm.busw', name:'Остановка «Запад»', position:v(-180,118), icon:'🚌' },
-  { id:'lm.busc', name:'Остановка «Главный вход»', position:v(-15,105), icon:'🚌' },
-  { id:'lm.gate', name:'Главный вход кампуса', position:v(73,-85), icon:'🚪' },
+  { id: 'lm.plaza', name: 'Площадь Шокина', position: v(150, -55), icon: '🟫' },
+  { id: 'lm.busw', name: 'Остановка «Запад»', position: v(-200, 108), icon: '🚌' },
+  { id: 'lm.busc', name: 'Остановка «Главный вход»', position: v(0, 100), icon: '🚌' },
+  { id: 'lm.gate', name: 'Главный вход кампуса', position: v(108.4, -42), icon: '🚪' },
 ];

@@ -10,7 +10,17 @@ import type {
   Building, CampusData, EntranceDoor, Floor, NavEdge, NavNode, Rect, Room, VerticalConnection,
 } from './types';
 import { OUTDOOR_EDGES, OUTDOOR_LANDMARKS, OUTDOOR_NODES, OUTDOOR_PATHS } from './campusOutdoor';
+import { DOORS, FOOTPRINTS, footprintToWorldRect, lx, ly, type Footprint, type Pt } from './campusLayout';
+
+/** Позиции уличных дверей (layout) по id узла — из campusLayout. */
+const DOOR_POS: Record<string, Pt> = Object.fromEntries(DOORS.map((d) => [d.id, d.pos]));
 import { BUILDING_NUMBER, formatRoomCode } from '../lib/roomCode';
+
+/** Footprint из campusLayout -> world Rect (worldX = x, worldZ = -y). */
+const L = (id: string): [number, number, number, number] => {
+  const f: Footprint = FOOTPRINTS[id]; const r = footprintToWorldRect(f);
+  return [r.minX, r.minZ, r.maxX, r.maxZ];
+};
 
 const FLOOR_H = 3.2, CEIL = 3.0, YOFF = 0.2;
 const fy = (lvl: number): number => lvl * FLOOR_H + YOFF;
@@ -18,8 +28,8 @@ const rc = (b: string, lvl: number, idx: number, suf?: string): string =>
   formatRoomCode({ building: BUILDING_NUMBER[b] ?? 0, floor: lvl + 1, room: idx, suffix: suf });
 
 /* affine JSON(0,0)=ЮЗ, X=восток 0..108, Y=север 0..98 -> world b1 X[-25,65] Z[-130,-40] */
-const mx = (jx: number): number => -25 + jx * (90 / 108);
-const mz = (jy: number): number => -40 - jy * (90 / 98);
+const mx = (jx: number): number => jx;
+const mz = (jy: number): number => -jy;
 type Conv = 'wh' | 'xy';
 function pr(poly: number[], conv: Conv): Rect {
   if (conv === 'wh') return { minX: mx(poly[0]), maxX: mx(poly[0]+poly[2]), minZ: mz(poly[1]+poly[3]), maxZ: mz(poly[1]) };
@@ -77,8 +87,8 @@ function build(cfg:BldCfg){
 }
 
 const B1:BldCfg={id:'b1',name:'Административный корпус (1)',short:'Корпус 1',kind:'admin',color:'#f59e0b',
-  foot:[-25,-130,65,-40],levels:[0,1],
-  door:{outdoorNode:'do.b1',pos:[73,-85],side:'east',label:'Главный вход (портал)'},
+  foot:L('b1'),levels:[0,1],
+  door:{outdoorNode:'do.b1',pos:[lx(DOOR_POS['do.b1']),ly(DOOR_POS['do.b1'])],side:'east',label:'Главный вход (портал)'},
   floors:[
     {lvl:0,name:'1 этаж',hall:pc([80,40,27.5,21],'wh'),cor:ringPts(R1),
       rooms:[
@@ -120,63 +130,63 @@ const B1:BldCfg={id:'b1',name:'Административный корпус (1)
 const CONFIGS:BldCfg[]=[
   B1,
   {id:'dk',name:'Дом культуры МИЭТ (2)',short:'Корпус 2 · ДК',kind:'other',color:'#fbbf24',
-    foot:[85,-130,165,-45],levels:[0,1],
-    door:{outdoorNode:'do.dk',pos:[77,-85],side:'west',label:'Вход ДК'},
+    foot:L('dk'),levels:[0,1],
+    door:{outdoorNode:'do.dk',pos:[lx(DOOR_POS['do.dk']),ly(DOOR_POS['do.dk'])],side:'west',label:'Вход ДК'},
     floors:[
-      {lvl:0,name:'1 этаж',hall:[95,-85],cor:[[110,-85],[140,-85]],
-        rooms:[{id:'dk_hall',num:rc('dk',0,1),name:'ДК МИЭТ (актовый зал)',kind:'assembly-hall',rect:[100,-125,160,-50]}],
-        verticals:[{kind:'stairs',x:140,z:-70,from:0,to:1,label:'Лестница ДК'}]},
-      {lvl:1,name:'2 этаж',cor:[[110,-85],[140,-85]],
-        rooms:[{id:'dk_canteen',num:rc('dk',1,1),name:'Столовая',kind:'cafeteria-seating',rect:[100,-125,130,-50]},
-               {id:'dk_adm',num:rc('dk',1,2),name:'Приёмная комиссия',kind:'office',rect:[135,-125,160,-50]}],verticals:[]},
+      {lvl:0,name:'1 этаж',hall:[40,-120],cor:[[50,-120],[80,-120]],
+        rooms:[{id:'dk_hall',num:rc('dk',0,1),name:'ДК МИЭТ (актовый зал)',kind:'assembly-hall',rect:[35,-160,95,-55]}],
+        verticals:[{kind:'stairs',x:85,z:-120,from:0,to:1,label:'Лестница ДК'}]},
+      {lvl:1,name:'2 этаж',cor:[[50,-120],[80,-120]],
+        rooms:[{id:'dk_canteen',num:rc('dk',1,1),name:'Столовая',kind:'cafeteria-seating',rect:[35,-160,65,-55]},
+               {id:'dk_adm',num:rc('dk',1,2),name:'Приёмная комиссия',kind:'office',rect:[70,-160,95,-55]}],verticals:[]},
     ]},
   {id:'uk3',name:'Учебный корпус 3',short:'Корпус 3',kind:'academic',color:'#f59e0b',
-    foot:[-120,-30,-25,55],levels:[0,1,2],
-    door:{outdoorNode:'do.uk3',pos:[-128,12],side:'west',label:'Вход 3 корпуса'},
+    foot:L('uk3'),levels:[0,1,2],
+    door:{outdoorNode:'do.uk3',pos:[lx(DOOR_POS['do.uk3']),ly(DOOR_POS['do.uk3'])],side:'west',label:'Вход 3 корпуса'},
     floors:[
-      {lvl:0,name:'1 этаж',hall:[-110,12],cor:[[-95,12],[-65,12],[-35,12]],
-        rooms:[{id:'uk3_canteen',num:rc('uk3',0,1),name:'Столовая',kind:'cafeteria-seating',rect:[-115,-25,-70,0]},
-               {id:'uk3_med',num:rc('uk3',0,2),name:'Здравпункт',kind:'ward',rect:[-65,-25,-30,0]}],
-        verticals:[{kind:'stairs',x:-65,z:35,from:0,to:1,label:'Лестница 3 корпуса'}]},
+      {lvl:0,name:'1 этаж',hall:[-115,-45],cor:[[-100,-45],[-70,-45],[-40,-45]],
+        rooms:[{id:'uk3_canteen',num:rc('uk3',0,1),name:'Столовая',kind:'cafeteria-seating',rect:[-120,-70,-75,-45]},
+               {id:'uk3_med',num:rc('uk3',0,2),name:'Здравпункт',kind:'ward',rect:[-70,-70,-35,-45]}],
+        verticals:[{kind:'stairs',x:-70,z:-20,from:0,to:1,label:'Лестница 3 корпуса'}]},
       {lvl:1,name:'2 этаж',cor:[[-95,12],[-65,12],[-35,12]],
-        rooms:[{id:'uk3_econ',num:rc('uk3',1,1),name:'Центр экономики учебного процесса',kind:'office',rect:[-115,-25,-70,0]},
-               {id:'uk3_mil',num:rc('uk3',1,2),name:'Военно-учётный стол',kind:'office',rect:[-65,-25,-30,0]}],
-        verticals:[{kind:'stairs',x:-65,z:35,from:1,to:2,label:'Лестница 3 корпуса'}]},
+        rooms:[{id:'uk3_econ',num:rc('uk3',1,1),name:'Центр экономики учебного процесса',kind:'office',rect:[-120,-70,-75,-45]},
+               {id:'uk3_mil',num:rc('uk3',1,2),name:'Военно-учётный стол',kind:'office',rect:[-70,-70,-35,-45]}],
+        verticals:[{kind:'stairs',x:-70,z:-20,from:1,to:2,label:'Лестница 3 корпуса'}]},
       {lvl:2,name:'3 этаж',cor:[[-95,12],[-65,12],[-35,12]],
-        rooms:[{id:'uk3_ss',num:rc('uk3',2,1),name:'Студенческий совет',kind:'office',rect:[-115,-25,-70,0]},
-               {id:'uk3_youth',num:rc('uk3',2,2),name:'Молодёжный центр',kind:'other',rect:[-65,-25,-30,0]}],verticals:[]},
+        rooms:[{id:'uk3_ss',num:rc('uk3',2,1),name:'Студенческий совет',kind:'office',rect:[-120,-70,-75,-45]},
+               {id:'uk3_youth',num:rc('uk3',2,2),name:'Молодёжный центр',kind:'other',rect:[-70,-70,-35,-45]}],verticals:[]},
     ]},
   {id:'uk4',name:'Учебный корпус 4',short:'Корпус 4',kind:'academic',color:'#f59e0b',
-    foot:[-125,-130,-35,-45],levels:[0],
-    door:{outdoorNode:'do.uk4',pos:[-133,-80],side:'west',label:'Вход 4 корпуса'},
+    foot:L('uk4'),levels:[0],
+    door:{outdoorNode:'do.uk4',pos:[lx(DOOR_POS['do.uk4']),ly(DOOR_POS['do.uk4'])],side:'south',label:'Вход 4 корпуса'},
     floors:[{lvl:0,name:'1 этаж',hall:[-115,-80],cor:[[-100,-80],[-70,-80],[-45,-80]],
       rooms:[{id:'uk4_iac',num:rc('uk4',0,1),name:'Информационно-аналитический центр',kind:'office',rect:[-120,-125,-40,-50]}],verticals:[]}]},
   {id:'proton',name:'Завод «Протон-МИЭТ» (6) + учебные аудитории',short:'Протон',kind:'other',color:'#a16207',
-    foot:[-245,-35,-130,55],levels:[0,1],
-    door:{outdoorNode:'do.proton',pos:[-122,10],side:'east',label:'Вход Протон (учебный)'},
+    foot:L('proton'),levels:[0,1],
+    door:{outdoorNode:'do.proton',pos:[lx(DOOR_POS['do.proton']),ly(DOOR_POS['do.proton'])],side:'east',label:'Вход Протон (учебный)'},
     floors:[
-      {lvl:0,name:'1 этаж (цех + ауд.)',hall:[-135,10],cor:[[-160,10],[-190,10],[-220,10]],
-        rooms:[{id:'pr_shop',num:'ЦЕХ',name:'Производственный цех',kind:'other',rect:[-240,-30,-145,0]},
-               {id:'pr_a1',num:rc('proton',0,1),name:'Учебная аудитория Протон',kind:'classroom',rect:[-140,-30,-135,0]}],
-        verticals:[{kind:'stairs',x:-190,z:30,from:0,to:1,label:'Лестница Протон'}]},
-      {lvl:1,name:'2 этаж (ауд. + ОК)',cor:[[-160,10],[-190,10],[-220,10]],
-        rooms:[{id:'pr_a2',num:rc('proton',1,1),name:'Учебная аудитория Протон',kind:'classroom',rect:[-240,-30,-190,0]},
-               {id:'pr_qc',num:rc('proton',1,2),name:'Отдел качества',kind:'office',rect:[-185,-30,-135,0]}],verticals:[]},
+      {lvl:0,name:'1 этаж (цех + ауд.)',hall:[-140,-45],cor:[[-165,-45],[-195,-45],[-225,-45]],
+        rooms:[{id:'pr_shop',num:'ЦЕХ',name:'Производственный цех',kind:'other',rect:[-245,-75,-150,-45]},
+               {id:'pr_a1',num:rc('proton',0,1),name:'Учебная аудитория Протон',kind:'classroom',rect:[-145,-75,-140,-45]}],
+        verticals:[{kind:'stairs',x:-195,z:-25,from:0,to:1,label:'Лестница Протон'}]},
+      {lvl:1,name:'2 этаж (ауд. + ОК)',cor:[[-165,-45],[-195,-45],[-225,-45]],
+        rooms:[{id:'pr_a2',num:rc('proton',1,1),name:'Учебная аудитория Протон',kind:'classroom',rect:[-245,-75,-195,-45]},
+               {id:'pr_qc',num:rc('proton',1,2),name:'Отдел качества',kind:'office',rect:[-190,-75,-140,-45]}],verticals:[]},
     ]},
   {id:'college',name:'Колледж электроники и информатики (8)',short:'Колледж',kind:'academic',color:'#fbbf24',
-    foot:[-210,62,-95,92],levels:[0,1],
-    door:{outdoorNode:'do.college',pos:[-150,108],side:'south',label:'Главный вход колледжа'},
+    foot:L('college'),levels:[0,1],
+    door:{outdoorNode:'do.college',pos:[lx(DOOR_POS['do.college']),ly(DOOR_POS['do.college'])],side:'south',label:'Главный вход колледжа'},
     floors:[
-      {lvl:0,name:'1 этаж',hall:[-150,85],cor:[[-190,85],[-150,85],[-110,85]],
-        rooms:[{id:'c101',num:rc('college',0,1),name:'Учебная аудитория (демо)',kind:'classroom',rect:[-205,65,-160,80]},
-               {id:'c102',num:rc('college',0,2),name:'Учебная аудитория (демо)',kind:'classroom',rect:[-140,65,-100,80]}],
-        verticals:[{kind:'stairs',x:-150,z:72,from:0,to:1,label:'Лестница колледжа'}]},
-      {lvl:1,name:'2 этаж',cor:[[-190,85],[-150,85],[-110,85]],
-        rooms:[{id:'c201',num:rc('college',1,1),name:'Компьютерный класс (демо)',kind:'lab',rect:[-205,65,-160,80]},
-               {id:'c202',num:rc('college',1,2),name:'Лаборатория сетей (демо)',kind:'lab',rect:[-140,65,-100,80]}],verticals:[]},
+      {lvl:0,name:'1 этаж',hall:[-150,-115],cor:[[-190,-115],[-150,-115],[-110,-115]],
+        rooms:[{id:'c101',num:rc('college',0,1),name:'Учебная аудитория (демо)',kind:'classroom',rect:[-205,-135,-160,-120]},
+               {id:'c102',num:rc('college',0,2),name:'Учебная аудитория (демо)',kind:'classroom',rect:[-140,-135,-100,-120]}],
+        verticals:[{kind:'stairs',x:-150,z:-128,from:0,to:1,label:'Лестница колледжа'}]},
+      {lvl:1,name:'2 этаж',cor:[[-190,-115],[-150,-115],[-110,-115]],
+        rooms:[{id:'c201',num:rc('college',1,1),name:'Компьютерный класс (демо)',kind:'lab',rect:[-205,-135,-160,-120]},
+               {id:'c202',num:rc('college',1,2),name:'Лаборатория сетей (демо)',kind:'lab',rect:[-140,-135,-100,-120]}],verticals:[]},
     ]},
   // лабораторный (7) — ориентир без интерьеров/целей
-  {id:'lab',name:'Лабораторный корпус (7, не для учёбы)',short:'Лабораторный',kind:'academic',color:'#d97706',foot:[-245,-130,-135,-45],levels:[0],floors:[]},
+  {id:'lab',name:'Лабораторный корпус (7, не для учёбы)',short:'Лабораторный',kind:'academic',color:'#d97706',foot:L('lab'),levels:[0],floors:[]},
 ];
 
 const built=CONFIGS.map(build);
