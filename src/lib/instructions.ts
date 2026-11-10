@@ -138,6 +138,10 @@ export function generateSteps(
     } else if (e.kind === 'exit-building') {
       push('exit-building', 'Выйдите из здания',
         prev.position, cur.position, d, hIn, hOut, segIdx, cur);
+    } else if (e.kind === 'passage') {
+      const lbl = cur.label ?? prev.label ?? 'крытый переход';
+      push('straight', `Пройдите по переходу «${lbl}» (${formatDistance(d)})`,
+        prev.position, cur.position, d, hIn, hOut, segIdx, cur, lbl);
     } else {
       const tk = turnKind(hOut - hIn);
       if (tk === 'straight') {
